@@ -7,7 +7,7 @@ export const meta = {
     en: "OpenAI Sora video generation (text-to-video, image-to-video, and remix)",
     zh: "OpenAI Sora 视频生成（文生视频、图生视频、remix）",
   },
-  version: "1.0.5",
+  version: "1.0.6",
   channelTypes: [55, 1], // OpenAI-type channels natively serve sora with the same wire format
   author: { name: "QuantumNous" },
   models: ["sora-2", "sora-2-pro"],
@@ -109,6 +109,24 @@ function requestValues(req, model) {
   return values;
 }
 
+// 出站参数归一化：不同画布工具/前置代理给的时长字段形状不一。
+// 顶层秒数缺失或像是占位值（<=1）时，依次从桥接带入的真值字段、duration、
+// metadata 里取真实时长，只改发给上游的 body —— 计费倍率读的是 ctx.requestBody，不受影响。
+function submissionValues(req, model) {
+  const values = requestValues(req, model);
+  if (!(Number(req.seconds) > 1)) {
+    const metadata = req.metadata && typeof req.metadata === "object" ? req.metadata : {};
+    for (const candidate of [req._billing_seconds, req.duration, metadata.seconds, metadata.duration]) {
+      const value = Number(candidate);
+      if (Number.isFinite(value) && value > 1) {
+        values.seconds = value;
+        break;
+      }
+    }
+  }
+  return values;
+}
+
 export function buildSubmitRequest(ctx) {
   const req = ctx.requestBody || {};
   if (!String(req.prompt || "").trim()) throw new Error("field prompt is required");
@@ -116,11 +134,11 @@ export function buildSubmitRequest(ctx) {
   const headers = { Authorization: "Bearer " + ctx.apiKey };
   if (action === "remix") {
     headers["Content-Type"] = "application/json";
-    return { url: ctx.baseUrl + "/v1/videos/" + ctx.originTaskId + "/remix", method: "POST", headers, body: requestValues(req, ctx.upstreamModel), action };
+    return { url: ctx.baseUrl + "/v1/videos/" + ctx.originTaskId + "/remix", method: "POST", headers, body: submissionValues(req, ctx.upstreamModel), action };
   }
   if ((ctx.files || []).length) {
     const parts = [];
-    const values = requestValues(req, ctx.upstreamModel);
+    const values = submissionValues(req, ctx.upstreamModel);
     for (const key of Object.keys(values)) {
       if (values[key] !== undefined && values[key] !== null && typeof values[key] !== "object") parts.push({ name: key, value: values[key] });
     }
@@ -131,7 +149,7 @@ export function buildSubmitRequest(ctx) {
     return { url: ctx.baseUrl + "/v1/videos", method: "POST", headers, bodyType: "multipart", parts };
   }
   headers["Content-Type"] = "application/json";
-  return { url: ctx.baseUrl + "/v1/videos", method: "POST", headers, body: requestValues(req, ctx.upstreamModel) };
+  return { url: ctx.baseUrl + "/v1/videos", method: "POST", headers, body: submissionValues(req, ctx.upstreamModel) };
 }
 
 export function parseSubmitResponse(ctx, resp) {
