@@ -7,7 +7,7 @@ export const meta = {
     en: "OpenAI Sora video generation (text-to-video, image-to-video, and remix)",
     zh: "OpenAI Sora 视频生成（文生视频、图生视频、remix）",
   },
-  version: "1.1.0",
+  version: "1.0.5",
   channelTypes: [55, 1], // OpenAI-type channels natively serve sora with the same wire format
   author: { name: "QuantumNous" },
   models: ["sora-2", "sora-2-pro"],
@@ -23,12 +23,19 @@ export const meta = {
     },
     // Requested output video dimensions.
     size: {
-      enum: ["720x1280", "1280x720", "1792x1024", "1024x1792"],
+      enum: ["720x1280", "1280x720", "1792x1024", "1024x1792", "16:9", "9:16", "1:1", "4:3", "3:4", "2:3", "21:9"],
       enumLabels: {
         "720x1280": { en: "720x1280", zh: "720x1280" },
         "1280x720": { en: "1280x720", zh: "1280x720" },
         "1792x1024": { en: "1792x1024", zh: "1792x1024" },
         "1024x1792": { en: "1024x1792", zh: "1024x1792" },
+        "16:9": { en: "16:9", zh: "16:9" },
+        "9:16": { en: "9:16", zh: "9:16" },
+        "1:1": { en: "1:1", zh: "1:1" },
+        "4:3": { en: "4:3", zh: "4:3" },
+        "3:4": { en: "3:4", zh: "3:4" },
+        "2:3": { en: "2:3", zh: "2:3" },
+        "21:9": { en: "21:9", zh: "21:9" },
       },
       description: { en: "Output video dimensions", zh: "输出视频尺寸" },
     },
@@ -40,6 +47,8 @@ function trimmed(value) {
   return String(value || "").trim();
 }
 
+// reference_images / reference_image 是画布与视频桥接实际使用的字段，必须透传给上游，
+// 否则图生视频会在中途被丢弃（只剩 prompt）。
 function collectReferenceImages(req) {
   const images = [];
   const raw = [].concat(req.reference_images || [], req.reference_image || []);
@@ -205,17 +214,16 @@ export const protocols = {
       for (const image of [req.image, req.input_reference].concat(req.images || [], input.images)) {
         if (trimmed(image) && !images.includes(trimmed(image))) images.push(trimmed(image));
       }
-      const referenceImages = collectReferenceImages(req);
       const requestBody = { model: model, prompt: prompt };
       if (images.length) requestBody.input_reference = images[0];
+      const referenceImages = collectReferenceImages(req);
       if (referenceImages.length) requestBody.reference_images = referenceImages;
       if (Object.prototype.hasOwnProperty.call(req, "seconds")) requestBody.seconds = req.seconds;
       else if (Object.prototype.hasOwnProperty.call(req, "duration")) requestBody.seconds = req.duration;
       if (Object.prototype.hasOwnProperty.call(req, "size")) requestBody.size = req.size;
       if (Object.prototype.hasOwnProperty.call(req, "metadata")) requestBody.metadata = req.metadata;
-      // Forward the remaining video options as-is. `seconds` is deliberately excluded:
-      // it doubles as the billing multiplier (1 for flat-rate models), while the real
-      // requested duration travels in metadata.seconds/duration.
+      // 其余视频参数按原样透传；故意不含 seconds —— 它同时是计费倍率（一口价时为 1），
+      // 真实时长放在 metadata 里，由号池解析。
       for (const key of ["duration", "ratio", "aspect_ratio", "resolution", "generate_audio", "count", "reference_audios"]) {
         if (req[key] !== undefined) requestBody[key] = req[key];
       }
