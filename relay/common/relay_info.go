@@ -981,6 +981,17 @@ type TaskSubmitReq struct {
 	Seconds        string         `json:"seconds,omitempty"`
 	InputReference string         `json:"input_reference,omitempty"`
 	Metadata       map[string]any `json:"metadata,omitempty"`
+
+	// 画布与视频桥接实际使用的字段。这些字段会原样转发给上游渠道
+	// （例如号池），因此必须保留在结构体里，否则会在中途被静默丢弃。
+	ReferenceImages []string `json:"reference_images,omitempty"`
+	ReferenceImage  string   `json:"reference_image,omitempty"`
+	Ratio           string   `json:"ratio,omitempty"`
+	AspectRatio     string   `json:"aspect_ratio,omitempty"`
+	Resolution      string   `json:"resolution,omitempty"`
+	GenerateAudio   *bool    `json:"generate_audio,omitempty"`
+	Count           *int     `json:"count,omitempty"`
+	ReferenceAudios []string `json:"reference_audios,omitempty"`
 }
 
 func (t *TaskSubmitReq) GetPrompt() string {
