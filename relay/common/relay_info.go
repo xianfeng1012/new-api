@@ -1028,6 +1028,10 @@ type TaskSubmitReq struct {
 	GenerateAudio   *bool    `json:"generate_audio,omitempty"`
 	Count           *int     `json:"count,omitempty"`
 	ReferenceAudios []string `json:"reference_audios,omitempty"`
+
+	// 视频桥接改写 seconds 时，会把用户请求的真实时长放在这个私有字段里带过来。
+	// 必须原样透传，上游（号池）才能在顶层 seconds 是占位值时取回真实时长。
+	BillingSeconds any `json:"_billing_seconds,omitempty"`
 }
 
 func (t *TaskSubmitReq) GetPrompt() string {
