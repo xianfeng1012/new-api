@@ -38,6 +38,16 @@ function trimmed(value) {
   return String(value || "").trim();
 }
 
+function collectReferenceImages(req) {
+  const images = [];
+  const raw = [].concat(req.reference_images || [], req.reference_image || []);
+  for (const item of raw) {
+    const value = trimmed(item && typeof item === "object" ? item.url : item);
+    if (value && !images.includes(value)) images.push(value);
+  }
+  return images;
+}
+
 function responsesInput(req) {
   const texts = [],
     images = [];
@@ -193,13 +203,26 @@ export const protocols = {
       for (const image of [req.image, req.input_reference].concat(req.images || [], input.images)) {
         if (trimmed(image) && !images.includes(trimmed(image))) images.push(trimmed(image));
       }
+      const referenceImages = collectReferenceImages(req);
       const requestBody = { model: model, prompt: prompt };
       if (images.length) requestBody.input_reference = images[0];
+      if (referenceImages.length) requestBody.reference_images = referenceImages;
       if (Object.prototype.hasOwnProperty.call(req, "seconds")) requestBody.seconds = req.seconds;
       else if (Object.prototype.hasOwnProperty.call(req, "duration")) requestBody.seconds = req.duration;
       if (Object.prototype.hasOwnProperty.call(req, "size")) requestBody.size = req.size;
       if (Object.prototype.hasOwnProperty.call(req, "metadata")) requestBody.metadata = req.metadata;
-      return { kind: "submit", model: model, action: images.length ? "image_to_video" : "text_to_video", requestBody: requestBody };
+      // Forward the remaining video options as-is. `seconds` is deliberately excluded:
+      // it doubles as the billing multiplier (1 for flat-rate models), while the real
+      // requested duration travels in metadata.seconds/duration.
+      for (const key of ["duration", "ratio", "aspect_ratio", "resolution", "generate_audio", "count", "reference_audios"]) {
+        if (req[key] !== undefined) requestBody[key] = req[key];
+      }
+      return {
+        kind: "submit",
+        model: model,
+        action: images.length || referenceImages.length ? "image_to_video" : "text_to_video",
+        requestBody: requestBody,
+      };
     },
     renderEvents: function (ctx, task, previousState) {
       const status = String(task.status || "UNKNOWN").toUpperCase();
@@ -266,7 +289,7 @@ protocols.openai_video = {
       return {
         kind: "submit",
         model: ctx.model,
-        action: req.input_reference || req.image ? "image_to_video" : "text_to_video",
+        action: req.input_reference || req.image || req.reference_images || req.reference_image ? "image_to_video" : "text_to_video",
         requestBody: Object.assign({}, req, { model: ctx.model }),
       };
     }
@@ -304,7 +327,10 @@ protocols.openai_video = {
     return {
       kind: "submit",
       model: ctx.model,
-      action: hasInputReferenceFile || req.input_reference || req.image ? "image_to_video" : "text_to_video",
+      action:
+        hasInputReferenceFile || req.input_reference || req.image || req.reference_images || req.reference_image
+          ? "image_to_video"
+          : "text_to_video",
       requestBody: Object.assign({}, req, { model: ctx.model }),
     };
   },
