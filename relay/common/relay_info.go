@@ -1042,11 +1042,20 @@ func (t *TaskSubmitReq) HasImage() bool {
 	return len(t.Images) > 0
 }
 
+// 画布类客户端对同一个字段的形状并不统一：generate_audio 有的是 true，有的写成
+// "true" / "1" / "是"；seconds 有的是数字，有的是字符串；count 同理。这些字段在
+// 结构体上是 *bool / string / *int，形状一不对整个请求就直接 400，客户端只能看到
+// 一句 Go 的解析错误（json: cannot unmarshal string into Go struct field
+// .Alias.generate_audio of type bool）。与 duration 一样先用 RawMessage 收下来
+// 再归一化：形状差异不该把请求打回。
 func (t *TaskSubmitReq) UnmarshalJSON(data []byte) error {
 	type Alias TaskSubmitReq
 	aux := &struct {
-		Metadata json.RawMessage `json:"metadata,omitempty"`
-		Duration json.RawMessage `json:"duration,omitempty"`
+		Metadata      json.RawMessage `json:"metadata,omitempty"`
+		Duration      json.RawMessage `json:"duration,omitempty"`
+		Seconds       json.RawMessage `json:"seconds,omitempty"`
+		GenerateAudio json.RawMessage `json:"generate_audio,omitempty"`
+		Count         json.RawMessage `json:"count,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(t),
@@ -1057,16 +1066,26 @@ func (t *TaskSubmitReq) UnmarshalJSON(data []byte) error {
 	}
 
 	if len(aux.Duration) > 0 {
-		var durationInt int
-		if err := common.Unmarshal(aux.Duration, &durationInt); err == nil {
-			t.Duration = durationInt
-		} else {
-			var durationStr string
-			if err := common.Unmarshal(aux.Duration, &durationStr); err == nil && durationStr != "" {
-				if v, err := strconv.Atoi(durationStr); err == nil {
-					t.Duration = v
-				}
-			}
+		if v, ok := looseTaskInt(aux.Duration); ok {
+			t.Duration = v
+		}
+	}
+
+	if len(aux.Seconds) > 0 {
+		if v, ok := looseTaskScalar(aux.Seconds); ok && v != "" {
+			t.Seconds = v
+		}
+	}
+
+	if len(aux.GenerateAudio) > 0 {
+		if v, ok := looseTaskBool(aux.GenerateAudio); ok {
+			t.GenerateAudio = &v
+		}
+	}
+
+	if len(aux.Count) > 0 {
+		if v, ok := looseTaskInt(aux.Count); ok {
+			t.Count = &v
 		}
 	}
 
@@ -1088,6 +1107,59 @@ func (t *TaskSubmitReq) UnmarshalJSON(data []byte) error {
 
 	return nil
 }
+
+// looseTaskScalar 把 JSON 标量（字符串 / 数字 / 布尔）统一成字符串。
+func looseTaskScalar(raw json.RawMessage) (string, bool) {
+	var s string
+	if err := common.Unmarshal(raw, &s); err == nil {
+		return s, true
+	}
+	var n json.Number
+	if err := common.Unmarshal(raw, &n); err == nil {
+		return n.String(), true
+	}
+	var b bool
+	if err := common.Unmarshal(raw, &b); err == nil {
+		return strconv.FormatBool(b), true
+	}
+	return "", false
+}
+
+// looseTaskInt 接受 JSON 整数、浮点，以及数字字符串（"15"）。
+func looseTaskInt(raw json.RawMessage) (int, bool) {
+	var i int
+	if err := common.Unmarshal(raw, &i); err == nil {
+		return i, true
+	}
+	var f float64
+	if err := common.Unmarshal(raw, &f); err == nil {
+		return int(f), true
+	}
+	if s, ok := looseTaskScalar(raw); ok {
+		if v, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+			return v, true
+		}
+	}
+	return 0, false
+}
+
+// looseTaskBool 接受 JSON bool，以及画布工具常见的 "true"/"false"/"1"/"0"/"是"/"否"。
+func looseTaskBool(raw json.RawMessage) (bool, bool) {
+	var b bool
+	if err := common.Unmarshal(raw, &b); err == nil {
+		return b, true
+	}
+	if s, ok := looseTaskScalar(raw); ok {
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "true", "1", "yes", "y", "on", "是", "真", "开":
+			return true, true
+		case "false", "0", "no", "n", "off", "否", "假", "关":
+			return false, true
+		}
+	}
+	return false, false
+}
+
 func (t *TaskSubmitReq) UnmarshalMetadata(v any) error {
 	metadata := t.Metadata
 	if metadata != nil {
