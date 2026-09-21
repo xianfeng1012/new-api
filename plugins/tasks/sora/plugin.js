@@ -7,7 +7,7 @@ export const meta = {
     en: "OpenAI Sora video generation (text-to-video, image-to-video, and remix)",
     zh: "OpenAI Sora 视频生成（文生视频、图生视频、remix）",
   },
-  version: "1.0.6",
+  version: "1.0.7",
   channelTypes: [55, 1], // OpenAI-type channels natively serve sora with the same wire format
   author: { name: "QuantumNous" },
   models: ["sora-2", "sora-2-pro"],
@@ -161,18 +161,20 @@ export function parseSubmitResponse(ctx, resp) {
   return { taskId, taskData: body };
 }
 
+// 计费口径：按次计费 —— 一次生成扣一次，倍率恒为 1。
+// 时长只用于出站 body（见 submissionValues，真值给号池解时长），不参与计费。
+// 历史坑（2026-09-21）：倍率原本取自客户端请求体的 seconds/duration，画布发的
+// multipart 请求不经桥接改写（桥接只改 JSON），于是 30 秒被当成 30 倍倍率 ——
+// ¥5/次 变成 ¥150/次。这里固定返回 1，客户端怎么传都不影响单价。
 export function extractUsage(ctx) {
   if (ctx.action === "remix") return {};
   const req = ctx.requestBody || {};
-  let seconds = Number(req.seconds || req.duration || 4);
-  if (!Number.isFinite(seconds) || seconds <= 0) seconds = 4;
-  return { seconds: Math.min(seconds, 3600), size: req.size || "720x1280" };
+  return { seconds: 1, size: req.size || "720x1280" };
 }
 
+// 完成结算与提交口径保持一致：同样按次计费，倍率恒为 1。
 export function extractUsageOnComplete(task, taskResult, body) {
-  const facts = {};
-  const seconds = Number((body || {}).seconds || (body || {}).duration || 0);
-  if (Number.isFinite(seconds) && seconds > 0) facts.seconds = Math.min(seconds, 3600);
+  const facts = { seconds: 1 };
   const size = trimmed((body || {}).size);
   if (["720x1280", "1280x720", "1792x1024", "1024x1792"].includes(size)) facts.size = size;
   return facts;
