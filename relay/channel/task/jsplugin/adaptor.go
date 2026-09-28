@@ -267,18 +267,18 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 				}
 				continue
 			}
-			field, index, validRef := pluginruntime.ParseFileReference(part.FileRef)
+			field, fileIndex, validRef := pluginruntime.ParseFileReference(part.FileRef)
 			files := form.File[field]
-			if !validRef || index >= len(files) {
+			if !validRef || fileIndex >= len(files) {
 				return nil, fmt.Errorf("unknown file reference %q", part.FileRef)
 			}
-			file, openErr := files[index].Open()
+			file, openErr := files[fileIndex].Open()
 			if openErr != nil {
 				return nil, openErr
 			}
 			filename := part.Filename
 			if filename == "" {
-				filename = files[index].Filename
+				filename = files[fileIndex].Filename
 			}
 			header := make(textproto.MIMEHeader)
 			disposition := mime.FormatMediaType("form-data", map[string]string{"name": part.Name, "filename": filename})
@@ -287,7 +287,7 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 				return nil, fmt.Errorf("invalid multipart name or filename")
 			}
 			header.Set("Content-Disposition", disposition)
-			header.Set("Content-Type", files[index].Header.Get("Content-Type"))
+			header.Set("Content-Type", files[fileIndex].Header.Get("Content-Type"))
 			destination, copyErr := writer.CreatePart(header)
 			if copyErr == nil {
 				_, copyErr = io.Copy(destination, file)
@@ -391,12 +391,12 @@ func encodeFilePlaceholder(placeholder map[string]any, form *multipart.Form, lim
 	if form == nil {
 		return "", fmt.Errorf("unknown file reference %q", ref)
 	}
-	field, index, validRef := pluginruntime.ParseFileReference(ref)
+	field, fileIndex, validRef := pluginruntime.ParseFileReference(ref)
 	files := form.File[field]
-	if !validRef || index >= len(files) {
+	if !validRef || fileIndex >= len(files) {
 		return "", fmt.Errorf("unknown file reference %q", ref)
 	}
-	header := files[index]
+	header := files[fileIndex]
 	maxBytes := limit
 	if raw, exists := placeholder["maxBytes"]; exists {
 		n, ok := usageNumber(raw, false)

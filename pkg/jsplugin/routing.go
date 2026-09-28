@@ -245,10 +245,9 @@ type PinnedEndpoint struct {
 	Candidates  []ProtocolBinding
 }
 
-// FileReference returns the opaque ref of the index-th uploaded file in a
-// multipart field. The first file keeps the historical `request_file:<field>`
-// spelling; later files in the same repeated field (`image[]`, `image[]`)
-// append `#<index>` so a plugin can address each of them.
+// FileReference names an uploaded multipart file for a plugin. The first file
+// of a field keeps the bare `request_file:<field>` spelling; later files in the
+// same repeated field append `#<index>` so a plugin can address each of them.
 func FileReference(field string, index int) string {
 	if index <= 0 {
 		return "request_file:" + field

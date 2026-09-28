@@ -119,6 +119,84 @@ export function parseSubmitResponse(ctx,r){return {taskId:"1"}} export function 
 	assert.Equal(t, "image-bytes", string(content))
 }
 
+func TestTaskAdaptorKeepsEveryFileOfARepeatedField(t *testing.T) {
+	// 回归（线上 2026-09-29）：4 张参考图经过这里只剩第 1 张，重复了 4 遍。
+	// 根因是文件引用只带字段名、不带索引，重建 multipart 时永远取 files[0]。
+	source := `
+export const meta = {apiVersion:1,key:"multi-file",name:"Multi File",version:"1.0.0",author:{name:"Test"},models:["m"],fetchMode:"per_task"};
+export function buildSubmitRequest(ctx) {
+  const parts = [{name:"model",value:"m"}];
+  for (const file of ctx.files) parts.push({name:file.field,fileRef:file.ref,filename:file.filename});
+  return {url:ctx.baseUrl+"/submit",bodyType:"multipart",parts};
+}
+export function parseSubmitResponse(){return {taskId:"1"}} export function buildQueryRequest(){return {url:"https://example.com"}} export function parseTaskResult(){return {status:"SUCCESS"}}
+`
+	plugin, err := pluginruntime.NewRegistry().Register(source, pluginruntime.Options{})
+	require.NoError(t, err)
+	adaptor := New(plugin)
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelBaseUrl: "https://provider.example"}, TaskRelayInfo: &relaycommon.TaskRelayInfo{}}
+	adaptor.Init(info)
+
+	want := []string{"first-image", "second-image", "third-image"}
+	var input bytes.Buffer
+	writer := multipart.NewWriter(&input)
+	for _, content := range want {
+		part, writeErr := writer.CreatePart(textproto.MIMEHeader{
+			"Content-Disposition": {`form-data; name="image[]"; filename="ref.png"`},
+			"Content-Type":        {"image/png"},
+		})
+		require.NoError(t, writeErr)
+		_, writeErr = part.Write([]byte(content))
+		require.NoError(t, writeErr)
+	}
+	require.NoError(t, writer.Close())
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", bytes.NewReader(input.Bytes()))
+	c.Request.Header.Set("Content-Type", writer.FormDataContentType())
+	c.Set("task_request", relaycommon.TaskSubmitReq{Prompt: "p"})
+
+	body, err := adaptor.BuildRequestBody(c, info)
+	require.NoError(t, err)
+	requestBytes, err := io.ReadAll(body)
+	require.NoError(t, err)
+	reader := multipart.NewReader(bytes.NewReader(requestBytes), strings.TrimPrefix(c.GetHeader("Content-Type"), "multipart/form-data; boundary="))
+	form, err := reader.ReadForm(1 << 20)
+	require.NoError(t, err)
+	require.Len(t, form.File["image[]"], len(want))
+
+	got := make([]string, 0, len(want))
+	for _, header := range form.File["image[]"] {
+		opened, openErr := header.Open()
+		require.NoError(t, openErr)
+		data, readErr := io.ReadAll(opened)
+		require.NoError(t, readErr)
+		opened.Close()
+		got = append(got, string(data))
+	}
+	assert.Equal(t, want, got, "同一字段里的每个文件都必须保留自己的内容，不能都变成第一张")
+}
+
+func TestTaskAdaptorRejectsFileIndexBeyondUploadedFiles(t *testing.T) {
+	source := `
+export const meta = {apiVersion:1,key:"bad-ref",name:"Bad Ref",version:"1.0.0",author:{name:"Test"},models:["m"],fetchMode:"per_task"};
+export function buildSubmitRequest(ctx) { return {url:ctx.baseUrl+"/submit",bodyType:"multipart",parts:[{name:"image[]",fileRef:"request_file:image[]#7"}]}; }
+export function parseSubmitResponse(){return {taskId:"1"}} export function buildQueryRequest(){return {url:"https://example.com"}} export function parseTaskResult(){return {status:"SUCCESS"}}
+`
+	plugin, err := pluginruntime.NewRegistry().Register(source, pluginruntime.Options{})
+	require.NoError(t, err)
+	adaptor := New(plugin)
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelBaseUrl: "https://provider.example"}, TaskRelayInfo: &relaycommon.TaskRelayInfo{}}
+	adaptor.Init(info)
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c = newMultipartFileContext(t, "image[]", "ref.png", "image/png", []byte("only-one"))
+	c.Set("task_request", relaycommon.TaskSubmitReq{Prompt: "p"})
+
+	_, err = adaptor.BuildRequestBody(c, info)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown file reference "request_file:image[]#7"`)
+}
+
 func TestTaskAdaptorInlinesJSONFilePlaceholders(t *testing.T) {
 	const fileBytes = "image-bytes"
 	encoded := base64.StdEncoding.EncodeToString([]byte(fileBytes))
