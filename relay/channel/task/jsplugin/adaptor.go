@@ -87,6 +87,10 @@ type TaskAdaptor struct {
 	routeRequest   *pluginruntime.RouteRequestContext
 	requestHeaders map[string]string
 	files          []map[string]any
+	// multipartType holds the multipart/form-data Content-Type (with boundary).
+	// The plugin only returns parts; the boundary is generated here, so it must
+	// be attached to the outbound request or the receiver cannot parse anything.
+	multipartType string
 }
 
 func New(plugin *pluginruntime.LoadedPlugin) *TaskAdaptor { return &TaskAdaptor{plugin: plugin} }
@@ -233,6 +237,9 @@ func (a *TaskAdaptor) BuildRequestHeader(_ *gin.Context, req *http.Request, _ *r
 	for name, value := range a.submit.Headers {
 		req.Header.Set(name, value)
 	}
+	if a.multipartType != "" {
+		req.Header.Set("Content-Type", a.multipartType)
+	}
 	return nil
 }
 
@@ -299,7 +306,7 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 		if err = writer.Close(); err != nil {
 			return nil, err
 		}
-		c.Request.Header.Set("Content-Type", writer.FormDataContentType())
+		a.multipartType = writer.FormDataContentType()
 		return bytes.NewReader(body.Bytes()), nil
 	}
 	if descriptor.Body == nil {

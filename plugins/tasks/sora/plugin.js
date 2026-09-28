@@ -282,12 +282,15 @@ protocols.openai_video = {
     for (const name of Object.keys(fields)) {
       req[name] = first(name);
     }
-    let hasInputReferenceFile = false;
+    // Reference images: accept both field spellings, up to 9 images.
+    const referenceFields = ["input_reference", "input_reference[]"];
+    let referenceFileCount = 0;
     for (const file of ctx.body.files || []) {
-      if (file.field !== "input_reference") throw new Error("unexpected file field: " + file.field);
-      if (hasInputReferenceFile) throw new Error("input_reference must be provided once");
-      hasInputReferenceFile = true;
+      if (referenceFields.indexOf(file.field) === -1) throw new Error("unexpected file field: " + file.field);
+      referenceFileCount += 1;
+      if (referenceFileCount > 9) throw new Error("at most 9 reference images are supported");
     }
+    const hasInputReferenceFile = referenceFileCount > 0;
     if (req.metadata !== undefined) {
       let parsed;
       try {
