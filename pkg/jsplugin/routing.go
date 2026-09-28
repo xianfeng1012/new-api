@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -226,6 +227,37 @@ type PinnedEndpoint struct {
 	Model       string
 	MappedModel string
 	Candidates  []ProtocolBinding
+}
+
+// FileReference names an uploaded multipart file for a plugin. The first file
+// of a field keeps the bare `request_file:<field>` spelling; later files in the
+// same repeated field append `#<index>` so a plugin can address each of them.
+func FileReference(field string, index int) string {
+	if index <= 0 {
+		return "request_file:" + field
+	}
+	return "request_file:" + field + "#" + strconv.Itoa(index)
+}
+
+// ParseFileReference resolves a ref produced by FileReference back to the
+// multipart field and the zero-based file index within that field.
+func ParseFileReference(ref string) (field string, index int, ok bool) {
+	rest, found := strings.CutPrefix(ref, "request_file:")
+	if !found || rest == "" {
+		return "", 0, false
+	}
+	field, suffix, hasIndex := strings.Cut(rest, "#")
+	if field == "" {
+		return "", 0, false
+	}
+	if !hasIndex {
+		return field, 0, true
+	}
+	parsed, err := strconv.Atoi(suffix)
+	if err != nil || parsed < 0 || strconv.Itoa(parsed) != suffix {
+		return "", 0, false
+	}
+	return field, parsed, true
 }
 
 // RouteRequestContext is the canonical request view exposed to declarative
