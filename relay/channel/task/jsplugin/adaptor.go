@@ -81,12 +81,16 @@ const maxTaskArtifacts = 64
 const maxTaskPluginPersistedJSONBytes = 1 << 20
 
 type TaskAdaptor struct {
-	plugin         *pluginruntime.LoadedPlugin
-	info           *relaycommon.RelayInfo
-	submit         *requestDescriptor
-	routeRequest   *pluginruntime.RouteRequestContext
-	requestHeaders map[string]string
-	files          []map[string]any
+	plugin *pluginruntime.LoadedPlugin
+	info   *relaycommon.RelayInfo
+	submit *requestDescriptor
+	// multipartContentType carries the boundary that BuildRequestBody generates
+	// for plugin multipart submits; BuildRequestHeader attaches it to the
+	// upstream request, which would otherwise go out without a Content-Type.
+	multipartContentType string
+	routeRequest         *pluginruntime.RouteRequestContext
+	requestHeaders       map[string]string
+	files                []map[string]any
 }
 
 func New(plugin *pluginruntime.LoadedPlugin) *TaskAdaptor { return &TaskAdaptor{plugin: plugin} }
@@ -234,6 +238,13 @@ func (a *TaskAdaptor) BuildRequestHeader(_ *gin.Context, req *http.Request, _ *r
 	for name, value := range a.submit.Headers {
 		req.Header.Set(name, value)
 	}
+	// The multipart boundary only exists after BuildRequestBody built the
+	// body, which happens after the plugin returned its headers. Attach it
+	// here so the upstream can actually parse the form: a new-api upstream
+	// keys body parsing off Content-Type and would otherwise read no model.
+	if a.multipartContentType != "" && req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", a.multipartContentType)
+	}
 	return nil
 }
 
@@ -300,7 +311,9 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 		if err = writer.Close(); err != nil {
 			return nil, err
 		}
-		c.Request.Header.Set("Content-Type", writer.FormDataContentType())
+		contentType := writer.FormDataContentType()
+		c.Request.Header.Set("Content-Type", contentType)
+		a.multipartContentType = contentType
 		return bytes.NewReader(body.Bytes()), nil
 	}
 	if descriptor.Body == nil {
