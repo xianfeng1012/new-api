@@ -329,6 +329,8 @@ export interface TaskLog {
   progress?: string
   progress_message_en?: string
   data?: unknown
+  // Media duration in seconds (video/audio tasks); absent when unknown.
+  duration_seconds?: number
   properties?: {
     input?: string
     upstream_model_name?: string

@@ -2,6 +2,7 @@ package common
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -144,6 +145,22 @@ func validatePrompt(prompt string) *dto.TaskError {
 // as a billing multiplier (OtherRatio "seconds"); an unbounded value could
 // overflow quota calculation into a negative charge.
 const MaxTaskDurationSeconds = 3600
+
+// TaskUsageDurationSeconds reads the media duration (seconds) from task usage
+// facts, preferring the canonical second-unit key and accepting the legacy
+// "duration" spelling used by some plugins. The value is bounded by
+// MaxTaskDurationSeconds so an unbounded request or upstream value can never
+// become a display or billing multiplier. Zero means "unknown".
+func TaskUsageDurationSeconds(facts map[string]any) float64 {
+	for _, key := range []string{"seconds", "duration"} {
+		value, ok := facts[key].(float64)
+		if !ok || value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+			continue
+		}
+		return min(value, float64(MaxTaskDurationSeconds))
+	}
+	return 0
+}
 
 func validateTaskDurationBounds(req TaskSubmitReq) *dto.TaskError {
 	seconds := req.Duration

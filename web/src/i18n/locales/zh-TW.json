@@ -6551,6 +6551,7 @@
     "Vertex AI Key Format": "Vertex AI 金鑰格式",
     "Vertex AI service account key must be valid JSON": "Vertex AI 服務賬號金鑰必須是有效 JSON",
     "Video": "影片",
+    "Video duration": "影片時長",
     "Video length in seconds": "影片時長（秒）",
     "Video pricing must be converted manually.": "影片定價需手動轉換。",
     "Video Remix": "影片 Remix",

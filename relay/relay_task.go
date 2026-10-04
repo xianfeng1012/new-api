@@ -35,6 +35,9 @@ type TaskSubmitResult struct {
 	Quota          int
 	Immediate      *relaycommon.TaskInfo
 	PluginState    []byte
+	// DurationSeconds is the media duration recorded on the task log. It is
+	// display-only metadata and never participates in billing.
+	DurationSeconds float64
 	//PerCallPrice   types.PriceData
 }
 
@@ -321,6 +324,10 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 			}
 		}
 	}
+	// 5b. 任务日志展示用的媒体时长。表达式计费已把 facts 存进 snapshot；
+	//     legacy 按次/按 token 计费没有 facts，这里再向插件取一次，仅用于展示，
+	//     失败或缺失都不影响提交与计费。
+	durationSeconds := taskMediaDurationSeconds(c, info, adaptor)
 
 	// 6. 将 OtherRatios 应用到基础额度（饱和转换，防止溢出成负数）
 	if info.TieredBillingSnapshot == nil && !common.StringsContains(constant.TaskPricePatches, modelName) {
@@ -400,14 +407,37 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	info.PriceData.Quota = finalQuota
 
 	return &TaskSubmitResult{
-		UpstreamTaskID: parsed.UpstreamTaskID,
-		TaskData:       parsed.TaskData,
-		ClientResponse: parsed.ClientResponse,
-		Platform:       platform,
-		Quota:          finalQuota,
-		Immediate:      parsed.Immediate,
-		PluginState:    parsed.PluginState,
+		UpstreamTaskID:  parsed.UpstreamTaskID,
+		TaskData:        parsed.TaskData,
+		ClientResponse:  parsed.ClientResponse,
+		Platform:        platform,
+		Quota:           finalQuota,
+		Immediate:       parsed.Immediate,
+		PluginState:     parsed.PluginState,
+		DurationSeconds: durationSeconds,
 	}, nil
+}
+
+// taskMediaDurationSeconds resolves the media duration (seconds) recorded on the
+// task log. Expression-billed tasks already carry the usage fact on the billing
+// snapshot; legacy per-call and per-token tasks carry none, so the plugin is
+// asked once more for display. Any failure returns 0 and never affects
+// submission or billing.
+func taskMediaDurationSeconds(c *gin.Context, info *relaycommon.RelayInfo, adaptor channel.TaskAdaptor) float64 {
+	if snap := info.TieredBillingSnapshot; snap != nil {
+		if seconds := relaycommon.TaskUsageDurationSeconds(snap.UsageFacts); seconds > 0 {
+			return seconds
+		}
+	}
+	provider, ok := adaptor.(channel.TaskValidatedUsageFactsProvider)
+	if !ok {
+		return 0
+	}
+	facts, err := provider.ExtractUsageFactsValidated(c, info)
+	if err != nil {
+		return 0
+	}
+	return relaycommon.TaskUsageDurationSeconds(facts)
 }
 
 // recalcQuotaFromRatios 根据 adjustedRatios 重新计算 quota。
@@ -643,25 +673,26 @@ func mapTaskStatusToSimple(status model.TaskStatus) string {
 
 func TaskModel2Dto(task *model.Task) *dto.TaskDto {
 	return &dto.TaskDto{
-		ID:         task.ID,
-		CreatedAt:  task.CreatedAt,
-		UpdatedAt:  task.UpdatedAt,
-		TaskID:     task.TaskID,
-		Platform:   string(task.Platform),
-		UserId:     task.UserId,
-		Group:      task.Group,
-		ChannelId:  task.ChannelId,
-		Quota:      task.Quota,
-		Action:     constant.NormalizeTaskAction(task.Action),
-		Status:     string(task.Status),
-		FailReason: task.FailReason,
-		ResultURL:  task.GetResultURL(),
-		SubmitTime: task.SubmitTime,
-		StartTime:  task.StartTime,
-		FinishTime: task.FinishTime,
-		Progress:   task.Progress,
-		Properties: task.Properties,
-		Username:   task.Username,
-		Data:       task.Data,
+		ID:              task.ID,
+		CreatedAt:       task.CreatedAt,
+		UpdatedAt:       task.UpdatedAt,
+		TaskID:          task.TaskID,
+		Platform:        string(task.Platform),
+		UserId:          task.UserId,
+		Group:           task.Group,
+		ChannelId:       task.ChannelId,
+		Quota:           task.Quota,
+		Action:          constant.NormalizeTaskAction(task.Action),
+		Status:          string(task.Status),
+		FailReason:      task.FailReason,
+		ResultURL:       task.GetResultURL(),
+		SubmitTime:      task.SubmitTime,
+		StartTime:       task.StartTime,
+		FinishTime:      task.FinishTime,
+		Progress:        task.Progress,
+		Properties:      task.Properties,
+		Username:        task.Username,
+		Data:            task.Data,
+		DurationSeconds: task.DurationSeconds(),
 	}
 }

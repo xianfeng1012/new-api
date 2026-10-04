@@ -84,6 +84,10 @@ type Properties struct {
 	Input             string `json:"input"`
 	UpstreamModelName string `json:"upstream_model_name,omitempty"`
 	OriginModelName   string `json:"origin_model_name,omitempty"`
+	// DurationSeconds is the requested/actual media duration in seconds, kept on
+	// the task row so the task log can show it without loading the upstream
+	// snapshot. It is display metadata and never participates in billing.
+	DurationSeconds float64 `json:"duration_seconds,omitempty"`
 }
 
 func (m *Properties) Scan(val any) error {
@@ -193,6 +197,22 @@ func (t *Task) GetResultURL() string {
 		return t.PrivateData.ResultURL
 	}
 	return t.FailReason
+}
+
+// DurationSeconds returns the media duration (seconds) shown on the task log:
+// the value recorded at submit, falling back to the persisted task-expression
+// usage facts for rows written before that field existed. Zero means unknown.
+func (t *Task) DurationSeconds() float64 {
+	if t == nil {
+		return 0
+	}
+	if t.Properties.DurationSeconds > 0 {
+		return t.Properties.DurationSeconds
+	}
+	if t.PrivateData.BillingContext == nil || t.PrivateData.BillingContext.TieredSnapshot == nil {
+		return 0
+	}
+	return commonRelay.TaskUsageDurationSeconds(t.PrivateData.BillingContext.TieredSnapshot.UsageFacts)
 }
 
 // GenerateTaskID 生成对外暴露的 task_xxxx 格式 ID

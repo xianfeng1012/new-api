@@ -6551,6 +6551,7 @@
     "Vertex AI Key Format": "Định dạng khóa Vertex AI",
     "Vertex AI service account key must be valid JSON": "Khóa tài khoản dịch vụ Vertex AI phải là JSON hợp lệ",
     "Video": "Video",
+    "Video duration": "Thời lượng video",
     "Video length in seconds": "Độ dài video (giây)",
     "Video pricing must be converted manually.": "Cần chuyển đổi giá video thủ công.",
     "Video Remix": "Remix video",

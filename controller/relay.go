@@ -615,6 +615,7 @@ func executeTaskSubmissionWith(
 
 	stage = "insert"
 	task := model.InitTask(result.Platform, relayInfo)
+	task.Properties.DurationSeconds = result.DurationSeconds
 	task.PrivateData.Execution = service.TaskExecutionSnapshotFromContext(c)
 	task.PrivateData.UpstreamTaskID = result.UpstreamTaskID
 	task.PrivateData.BillingSource = relayInfo.BillingSource

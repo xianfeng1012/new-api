@@ -224,6 +224,51 @@ export function useTaskLogsColumns(
         },
         meta: { mobileTitle: true },
       },
+      {
+        id: 'model',
+        header: t('Model'),
+        accessorFn: (row) =>
+          row.properties?.origin_model_name ||
+          row.properties?.upstream_model_name ||
+          '',
+        cell: ({ row }) => {
+          const model = row.original.properties?.origin_model_name
+          const upstream = row.original.properties?.upstream_model_name
+          if (!model && !upstream) {
+            return <span className='text-muted-foreground/60 text-xs'>-</span>
+          }
+          return (
+            <div className='flex max-w-[180px] flex-col gap-0.5'>
+              <span className='truncate text-xs font-medium'>
+                {model || upstream}
+              </span>
+              {model && upstream && upstream !== model ? (
+                <span className='text-muted-foreground truncate font-mono text-[11px]'>
+                  {upstream}
+                </span>
+              ) : null}
+            </div>
+          )
+        },
+        size: 180,
+      },
+      {
+        id: 'video_duration',
+        header: t('Video duration'),
+        accessorFn: (row) => row.duration_seconds ?? 0,
+        cell: ({ row }) => {
+          const seconds = row.original.duration_seconds
+          if (!seconds || seconds <= 0) {
+            return <span className='text-muted-foreground/60 text-xs'>-</span>
+          }
+          return (
+            <span className='border-border/60 bg-muted/30 inline-flex items-center rounded-md border px-1.5 py-0.5 font-mono text-xs tabular-nums'>
+              {Number.isInteger(seconds) ? seconds : seconds.toFixed(1)}s
+            </span>
+          )
+        },
+        meta: { label: t('Video duration') },
+      },
       createDurationColumn<TaskLog>({
         submitTimeKey: 'submit_time',
         finishTimeKey: 'finish_time',
