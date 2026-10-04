@@ -83,3 +83,54 @@ func TestSoraUsageSecondsByBillingPurpose(t *testing.T) {
 		})
 	}
 }
+
+// 制品直链回归：任务数据里带号池直链时不再绕上游 /content 代理。
+// 历史坑：上游 /content 502 时，带 access 的能力请求会把失败掩码成 404，
+// 前台表现为「任务日志 → 制品」视频打不开。
+func TestSoraArtifactContentPrefersDirectURL(t *testing.T) {
+	source, err := builtinplugins.Source("sora")
+	require.NoError(t, err)
+	registry := jsplugin.NewRegistry()
+	plugin, err := registry.RegisterFactory(source, jsplugin.Options{Key: "sora"})
+	require.NoError(t, err)
+
+	direct := "http://v16-dola.dola.com/example/video.mp4?a=1"
+	descriptor := func(t *testing.T, data map[string]any) map[string]any {
+		t.Helper()
+		value, callErr := plugin.Engine.Call(t.Context(), "buildContentRequest", map[string]any{
+			"artifactKey":    "video",
+			"data":           data,
+			"clientRequest":  map[string]any{"method": "GET", "headers": map[string]any{}},
+			"baseUrl":        "https://upstream.example",
+			"upstreamTaskId": "task_upstream",
+			"apiKey":         "sk-channel",
+		})
+		require.NoError(t, callErr)
+		encoded, marshalErr := common.Marshal(value)
+		require.NoError(t, marshalErr)
+		var result map[string]any
+		require.NoError(t, common.Unmarshal(encoded, &result))
+		return result
+	}
+
+	t.Run("uses the video url from task data", func(t *testing.T) {
+		result := descriptor(t, map[string]any{"status": "completed", "video": map[string]any{"url": direct}})
+		assert.Equal(t, direct, result["url"])
+		assert.Equal(t, true, result["credentialless"])
+		_, hasHeaders := result["headers"]
+		assert.False(t, hasHeaders, "direct playback must not carry the channel key")
+	})
+
+	t.Run("uses the top level url from task data", func(t *testing.T) {
+		result := descriptor(t, map[string]any{"status": "completed", "url": direct})
+		assert.Equal(t, direct, result["url"])
+	})
+
+	t.Run("falls back to the upstream content route without a direct url", func(t *testing.T) {
+		result := descriptor(t, map[string]any{"status": "completed"})
+		assert.Equal(t, "https://upstream.example/v1/videos/task_upstream/content", result["url"])
+		headers, ok := result["headers"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "Bearer sk-channel", headers["Authorization"])
+	})
+}
