@@ -34,6 +34,21 @@ export const meta = {
   ],
   protocols: [{ name: "openai_responses", supports: ["stream", "sync", "background"] }, "openai_video"],
 };
+// 画布（infinite-canvas）等 OpenAI-Videos 客户端按「首尾帧 / 全能参考」模式发参考图，
+// 字段名有 input_reference / input_reference[] / image / image[] / first_frame / last_frame
+// 等多种写法，语义都是同一张参考图。这里统一识别，避免按裸名严格等值把请求打死。
+function isReferenceImageField(name) {
+  const bare = String(name == null ? "" : name).trim().replace(/\[\]$/, "");
+  return (
+    bare === "input_reference" ||
+    bare === "image" ||
+    bare === "images" ||
+    bare === "reference_image" ||
+    bare === "reference_images" ||
+    bare === "first_frame" ||
+    bare === "last_frame"
+  );
+}
 
 function trimmed(value) {
   return String(value || "").trim();
@@ -323,6 +338,7 @@ protocols.openai_video = {
     if (!ctx.body || (ctx.body.kind !== "json" && ctx.body.kind !== "multipart")) throw new Error("JSON or multipart body required");
     let req;
     let hasInputReferenceFile = false;
+    let referenceFileRef = "";
     if (ctx.body.kind === "json") {
       if (!ctx.body.value || Array.isArray(ctx.body.value)) throw new Error("JSON object required");
       req = Object.assign({}, ctx.body.value);
@@ -338,9 +354,10 @@ protocols.openai_video = {
         req[name] = first(name);
       }
       for (const file of ctx.body.files || []) {
-        if (file.field !== "input_reference") throw new Error("unexpected file field: " + file.field);
+        if (!isReferenceImageField(file.field)) throw new Error("unexpected file field: " + file.field);
         if (hasInputReferenceFile) throw new Error("input_reference must be provided once");
         hasInputReferenceFile = true;
+        referenceFileRef = String(file.ref || "");
       }
       if (req.metadata !== undefined) {
         let parsed;
@@ -367,7 +384,7 @@ protocols.openai_video = {
       if (resolution !== "720p" && resolution !== "1080p" && resolution !== "4k") throw new Error("resolution must be one of 720p, 1080p, or 4k");
     }
     if (hasInputReferenceFile) {
-      req.images = [{ __fileRef: "request_file:input_reference", encoding: "base64", maxBytes: 20971520 }];
+      req.images = [{ __fileRef: referenceFileRef, encoding: "base64", maxBytes: 20971520 }];
     }
     return {
       kind: "submit",

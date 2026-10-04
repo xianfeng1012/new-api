@@ -48,6 +48,21 @@ export const meta = {
   ],
   protocols: [{ name: "openai_responses", supports: ["stream", "sync", "background"] }, "openai_video"],
 };
+// 画布（infinite-canvas）等 OpenAI-Videos 客户端按「首尾帧 / 全能参考」模式发参考图，
+// 字段名有 input_reference / input_reference[] / image / image[] / first_frame / last_frame
+// 等多种写法，语义都是同一张参考图。这里统一识别，避免按裸名严格等值把请求打死。
+function isReferenceImageField(name) {
+  const bare = String(name == null ? "" : name).trim().replace(/\[\]$/, "");
+  return (
+    bare === "input_reference" ||
+    bare === "image" ||
+    bare === "images" ||
+    bare === "reference_image" ||
+    bare === "reference_images" ||
+    bare === "first_frame" ||
+    bare === "last_frame"
+  );
+}
 
 const RESOLUTIONS = ["360p", "540p", "720p", "1080p"];
 
@@ -394,6 +409,7 @@ protocols.openai_video = {
     if (!ctx.body || (ctx.body.kind !== "json" && ctx.body.kind !== "multipart")) throw new Error("JSON or multipart body required");
     let req;
     let hasInputReferenceFile = false;
+    let referenceFileRef = "";
     if (ctx.body.kind === "json") {
       if (!ctx.body.value || Array.isArray(ctx.body.value)) throw new Error("JSON object required");
       req = Object.assign({}, ctx.body.value);
@@ -409,9 +425,10 @@ protocols.openai_video = {
         req[name] = first(name);
       }
       for (const file of ctx.body.files || []) {
-        if (file.field !== "input_reference") throw new Error("unexpected file field: " + file.field);
+        if (!isReferenceImageField(file.field)) throw new Error("unexpected file field: " + file.field);
         if (hasInputReferenceFile) throw new Error("input_reference must be provided once");
         hasInputReferenceFile = true;
+        referenceFileRef = String(file.ref || "");
       }
       if (req.metadata !== undefined) {
         let parsed;
@@ -431,7 +448,7 @@ protocols.openai_video = {
     if (seconds !== undefined) req.duration = Number(seconds);
     else req.duration = defaultDuration(model);
     if (hasInputReferenceFile) {
-      req.images = [{ __fileRef: "request_file:input_reference", encoding: "dataUrl", maxBytes: 15728640 }];
+      req.images = [{ __fileRef: referenceFileRef, encoding: "dataUrl", maxBytes: 15728640 }];
     } else {
       const image = trimmed(req.input_reference || req.image);
       if (image && (!Array.isArray(req.images) || req.images.length === 0)) req.images = [image];

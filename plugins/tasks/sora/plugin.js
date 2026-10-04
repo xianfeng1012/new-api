@@ -31,6 +31,21 @@ export const meta = {
   usageExamples: [{ label: "5s", facts: { seconds: 5 } }],
   protocols: [{ name: "openai_responses", supports: ["stream", "sync", "background"] }, "openai_video"],
 };
+// 画布（infinite-canvas）等 OpenAI-Videos 客户端按「首尾帧 / 全能参考」模式发参考图，
+// 字段名有 input_reference / input_reference[] / image / image[] / first_frame / last_frame
+// 等多种写法，语义都是同一张参考图。这里统一识别，避免按裸名严格等值把请求打死。
+function isReferenceImageField(name) {
+  const bare = String(name == null ? "" : name).trim().replace(/\[\]$/, "");
+  return (
+    bare === "input_reference" ||
+    bare === "image" ||
+    bare === "images" ||
+    bare === "reference_image" ||
+    bare === "reference_images" ||
+    bare === "first_frame" ||
+    bare === "last_frame"
+  );
+}
 
 function trimmed(value) {
   return String(value || "").trim();
@@ -136,7 +151,7 @@ export function buildSubmitRequest(ctx) {
     if (values.metadata && typeof values.metadata === "object" && !Array.isArray(values.metadata)) {
       parts.push({ name: "metadata", value: JSON.stringify(values.metadata) });
     }
-    for (const file of ctx.files) parts.push({ name: file.field, fileRef: file.ref, filename: file.filename });
+    for (const file of ctx.files) parts.push({ name: "input_reference", fileRef: file.ref, filename: file.filename });
     return { url: ctx.baseUrl + "/v1/videos", method: "POST", headers, bodyType: "multipart", parts };
   }
   headers["Content-Type"] = "application/json";
@@ -360,9 +375,11 @@ protocols.openai_video = {
       req[name] = first(name);
     }
     let hasInputReferenceFile = false;
+    let referenceFileCount = 0;
     for (const file of ctx.body.files || []) {
-      if (file.field !== "input_reference") throw new Error("unexpected file field: " + file.field);
-      if (hasInputReferenceFile) throw new Error("input_reference must be provided once");
+      if (!isReferenceImageField(file.field)) throw new Error("unexpected file field: " + file.field);
+      referenceFileCount += 1;
+      if (referenceFileCount > 9) throw new Error("at most 9 reference images are supported");
       hasInputReferenceFile = true;
     }
     if (req.metadata !== undefined) {
