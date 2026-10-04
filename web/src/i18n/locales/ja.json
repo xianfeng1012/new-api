@@ -6611,6 +6611,7 @@
     "Vertex AI Key Format": "Vertex AIキー形式",
     "Vertex AI service account key must be valid JSON": "Vertex AI サービスアカウントキーは有効な JSON である必要があります",
     "Video": "動画",
+    "Video duration": "動画の長さ",
     "Video length in seconds": "動画の長さ（秒）",
     "Video pricing must be converted manually.": "動画料金は手動で変換してください。",
     "Video Remix": "動画 Remix",

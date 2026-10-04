@@ -1,3 +1,9 @@
+// 视频桥接（newapi-video-bridge 等 Sora 协议兼容上游）通过 55 号渠道提供的模型。
+// 渠道按类型选中本插件，但计费配置（计费与支付 → 模型定价）按模型名解析 usage schema，
+// 因此这些模型必须在此声明，才能解析出 seconds 字段并配置「按秒计费」。
+// 新增/改名桥接模型时同步更新此列表。
+const BRIDGE_VIDEO_MODELS = ["seedance_v2.0_std", "seedance_v2.5"];
+
 export const meta = {
   apiVersion: 1,
   key: "sora",
@@ -7,10 +13,10 @@ export const meta = {
     en: "OpenAI Sora video generation (text-to-video, image-to-video, and remix)",
     zh: "OpenAI Sora 视频生成（文生视频、图生视频、remix）",
   },
-  version: "1.0.8",
+  version: "1.0.9",
   channelTypes: [55, 1], // OpenAI-type channels natively serve sora with the same wire format
   author: { name: "QuantumNous" },
-  models: ["sora-2", "sora-2-pro"],
+  models: ["sora-2", "sora-2-pro"].concat(BRIDGE_VIDEO_MODELS),
   fetchMode: "per_task",
   // A New API gateway serves /v1/videos as a host protocol, so no URL changes.
   upstreams: ["vendor", "new_api"],
@@ -22,6 +28,7 @@ export const meta = {
       description: { en: "Video generation unit price", zh: "视频生成单价" },
     },
   },
+  usageExamples: [{ label: "5s", facts: { seconds: 5 } }],
   protocols: [{ name: "openai_responses", supports: ["stream", "sync", "background"] }, "openai_video"],
 };
 
@@ -143,20 +150,35 @@ export function parseSubmitResponse(ctx, resp) {
   return { taskId, taskData: body };
 }
 
-// 计费口径：按次计费 —— 一次生成扣一次，倍率恒为 1。
-// 时长只用于出站 body（见 submissionValues，真值给号池解时长），不参与计费。
-// 历史坑（2026-09-21）：倍率原本取自客户端请求体的 seconds/duration，画布发的
-// multipart 请求不经桥接改写（桥接只改 JSON），于是 30 秒被当成 30 倍倍率 ——
-// ¥5/次 变成 ¥150/次。这里固定返回 1，客户端怎么传都不影响单价。
+// 真实视频时长（秒）：桥接在 JSON 提交里注入 _billing_seconds 真值；
+// 画布直连的 multipart 不经桥接改写，退回请求体的 duration/seconds。
+// 上限沿用任务时长上限（3600s），异常值不会放大计费。
+function billingSeconds(req) {
+  const metadata = req.metadata && typeof req.metadata === "object" && !Array.isArray(req.metadata) ? req.metadata : {};
+  for (const candidate of [req._billing_seconds, req.duration, metadata.seconds, metadata.duration, req.seconds]) {
+    const value = Number(candidate);
+    if (Number.isFinite(value) && value > 0) return Math.min(value, 3600);
+  }
+  return 1;
+}
+
+// 计费口径分两条互不影响的路径：
+// - 按次计费：legacy ratio 路径（ModelPrice 固定单价 / 模型倍率）读 billing_ratios，
+//   倍率恒为 1，时长不参与倍率。历史坑（2026-09-21）：曾把客户端 seconds 当倍率返回，
+//   ¥/次 被放大成 ¥×(秒数)/次，因此这里必须保持 1。
+// - 按秒计费：task 表达式路径读 facts，返回真实时长（秒），配合「视频生成单价（每秒）」。
 export function extractUsage(ctx) {
   if (ctx.action === "remix") return {};
   const req = ctx.requestBody || {};
-  return { seconds: 1, size: req.size || "720x1280" };
+  const size = req.size || "720x1280";
+  if (ctx.usagePurpose === "billing_ratios") return { seconds: 1, size: size };
+  return { seconds: billingSeconds(req), size: size };
 }
 
-// 完成结算与提交口径保持一致：同样按次计费，倍率恒为 1。
+// 完成结算：上游不回传真实时长，因此不回写 seconds，保留提交阶段估算的真实时长，
+// 避免用 1 覆盖表达式计费的按秒金额。legacy ratio 路径不返回倍率同样等价于按次。
 export function extractUsageOnComplete(task, taskResult, body) {
-  const facts = { seconds: 1 };
+  const facts = {};
   const size = trimmed((body || {}).size);
   if (["720x1280", "1280x720", "1792x1024", "1024x1792"].includes(size)) facts.size = size;
   return facts;
@@ -222,6 +244,9 @@ export const protocols = {
       if (referenceImages.length) requestBody.reference_images = referenceImages;
       if (Object.prototype.hasOwnProperty.call(req, "seconds")) requestBody.seconds = req.seconds;
       else if (Object.prototype.hasOwnProperty.call(req, "duration")) requestBody.seconds = req.duration;
+      // 前置桥接把真实时长放在私有字段 _billing_seconds，顶层 seconds 只是占位值。
+      // 透传它，按秒计费与出站时长归一化才能读到真值（与 openai_video 路径一致）。
+      if (Object.prototype.hasOwnProperty.call(req, "_billing_seconds")) requestBody._billing_seconds = req._billing_seconds;
       if (Object.prototype.hasOwnProperty.call(req, "size")) requestBody.size = req.size;
       if (Object.prototype.hasOwnProperty.call(req, "metadata")) requestBody.metadata = req.metadata;
       // 其余视频参数按原样透传；故意不含 seconds —— 它同时是计费倍率（一口价时为 1），
@@ -339,10 +364,7 @@ protocols.openai_video = {
     return {
       kind: "submit",
       model: ctx.model,
-      action:
-        hasInputReferenceFile || req.input_reference || req.image || req.reference_images || req.reference_image
-          ? "image_to_video"
-          : "text_to_video",
+      action: hasInputReferenceFile || req.input_reference || req.image || req.reference_images || req.reference_image ? "image_to_video" : "text_to_video",
       requestBody: Object.assign({}, req, { model: ctx.model }),
     };
   },
