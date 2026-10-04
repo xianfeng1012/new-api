@@ -13,7 +13,7 @@ export const meta = {
     en: "OpenAI Sora video generation (text-to-video, image-to-video, and remix)",
     zh: "OpenAI Sora 视频生成（文生视频、图生视频、remix）",
   },
-  version: "1.0.9",
+  version: "1.0.10",
   channelTypes: [55, 1], // OpenAI-type channels natively serve sora with the same wire format
   author: { name: "QuantumNous" },
   models: ["sora-2", "sora-2-pro"].concat(BRIDGE_VIDEO_MODELS),
@@ -210,8 +210,27 @@ export function listArtifacts(task) {
   return task.status === "SUCCESS" ? [{ key: "video", type: "video" }] : [];
 }
 
+// 任务数据里若已带视频直链（号池/上游返回的 video.url / url），优先直连。
+// 上游 /content 代理不可用时（例如上游本身 502），带 access 的能力请求会把失败
+// 掩码成 404，表现就是「任务日志 → 制品」里的视频打不开。直链按 credentialless
+// 取用，不携带渠道密钥。
+function artifactVideoURL(data) {
+  let node = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  for (let depth = 0; depth < 2; depth += 1) {
+    const video = node.video && typeof node.video === "object" && !Array.isArray(node.video) ? node.video : {};
+    for (const candidate of [video.url, video.video_url, node.url, node.video_url]) {
+      const value = trimmed(candidate);
+      if (/^https?:\/\//i.test(value)) return value;
+    }
+    node = node.data && typeof node.data === "object" && !Array.isArray(node.data) ? node.data : {};
+  }
+  return "";
+}
+
 export function buildContentRequest(ctx) {
   if (ctx.artifactKey !== "video") throw new Error("artifact_not_found");
+  const directURL = artifactVideoURL(ctx.data);
+  if (directURL) return { url: directURL, method: ctx.clientRequest.method, credentialless: true };
   return {
     url: ctx.baseUrl + "/v1/videos/" + encodeURIComponent(ctx.upstreamTaskId) + "/content",
     method: ctx.clientRequest.method,
