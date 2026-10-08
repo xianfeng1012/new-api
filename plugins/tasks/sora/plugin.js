@@ -2,7 +2,8 @@
 // 渠道按类型选中本插件，但计费配置（计费与支付 → 模型定价）按模型名解析 usage schema，
 // 因此这些模型必须在此声明，才能解析出 seconds 字段并配置「按秒计费」。
 // 新增/改名桥接模型时同步更新此列表。
-const BRIDGE_VIDEO_MODELS = ["seedance_v2.0_std", "seedance_v2.5"];
+const BRIDGE_VIDEO_MODELS = ["seedance_v2.0", "seedance_v2.0_std", "seedance_v2.5", "seedance-2.0", "seedance-2.5"];
+const MEAICC_VIDEO_MODELS = ["sd-2.5-c1"];
 
 export const meta = {
   apiVersion: 1,
@@ -13,10 +14,10 @@ export const meta = {
     en: "OpenAI Sora video generation (text-to-video, image-to-video, and remix)",
     zh: "OpenAI Sora 视频生成（文生视频、图生视频、remix）",
   },
-  version: "1.0.10",
+  version: "1.0.16",
   channelTypes: [55, 1], // OpenAI-type channels natively serve sora with the same wire format
   author: { name: "QuantumNous" },
-  models: ["sora-2", "sora-2-pro"].concat(BRIDGE_VIDEO_MODELS),
+  models: ["sora-2", "sora-2-pro"].concat(BRIDGE_VIDEO_MODELS, MEAICC_VIDEO_MODELS),
   fetchMode: "per_task",
   // A New API gateway serves /v1/videos as a host protocol, so no URL changes.
   upstreams: ["vendor", "new_api"],
@@ -133,6 +134,144 @@ function submissionValues(req, model) {
   return values;
 }
 
+// ---------------------------------------------------------------------------
+// meaicc (api.meaicc.com) 上游适配
+//
+// meaicc 的 /v1/videos 不是 OpenAI Videos 语义，它只认自家文档那一套：
+//   { model, input: { prompt, media: [{ type, url }] },
+//     parameters: { resolution, ratio, duration } }
+// - 顶层 prompt 它不看，真正的提示词只在 input.prompt；
+// - parameters.duration 必须是 JSON 整数；顶层 duration 一旦出现也必须是整数，
+//   否则上游直接 400：
+//     json: cannot unmarshal string into Go struct field .Alias.duration of type int
+// 因此这里把宿主归一化后的请求重新组装成 meaicc 的形状，并把所有时长字段
+// （duration / seconds / metadata.*）压成整数再夹到它接受的范围。
+//
+// 出站 body 会先由 protocols.*.decodeRequest 组装一次，再被 buildSubmitRequest
+// 走一遍，所以下面每个取值都同时认「画布原始字段」和「已组装好的 meaicc 形状」，
+// 保证重复执行不丢字段。
+const MEAICC_DURATION_MIN = 4;
+const MEAICC_DURATION_MAX = 30;
+
+function isMeaicc(ctx) {
+  // 上游域名或模型名任一命中即按 meaicc 形状出站：渠道换域名、走代理，
+  // 或本地用假上游联调时都不会漏判。
+  if (/meaicc\.com/i.test(String((ctx && ctx.baseUrl) || ""))) return true;
+  const model = String((ctx && (ctx.upstreamModel || ctx.model)) || "").trim();
+  return MEAICC_VIDEO_MODELS.indexOf(model) >= 0;
+}
+
+function meaiccParameters(req) {
+  return req.parameters && typeof req.parameters === "object" && !Array.isArray(req.parameters) ? req.parameters : {};
+}
+
+function meaiccSeconds(req) {
+  const parameters = meaiccParameters(req);
+  const metadata = req.metadata && typeof req.metadata === "object" && !Array.isArray(req.metadata) ? req.metadata : {};
+  for (const candidate of [parameters.duration, req.duration, req.seconds, metadata.duration, metadata.seconds, req._billing_seconds]) {
+    const value = Number(candidate);
+    if (Number.isFinite(value) && value > 0) {
+      return Math.min(Math.max(Math.round(value), MEAICC_DURATION_MIN), MEAICC_DURATION_MAX);
+    }
+  }
+  return 5;
+}
+
+function parseSize(value) {
+  const matched = trimmed(value).match(/^(\d{2,5})\s*[x*\u00d7]\s*(\d{2,5})$/);
+  if (!matched) return null;
+  return { width: Number(matched[1]), height: Number(matched[2]) };
+}
+
+function meaiccResolution(req) {
+  const fromParameters = trimmed(meaiccParameters(req).resolution).match(/(\d{3,4})\s*p/i);
+  if (fromParameters) return fromParameters[1] + "p";
+  const matched = trimmed(req.resolution).match(/(\d{3,4})\s*p/i);
+  if (matched) return matched[1] + "p";
+  const size = parseSize(req.size);
+  if (size) {
+    // WxH -> 分辨率档：按短边判定（1280x720 与 720x1280 都是 720p）。
+    const shortSide = Math.min(size.width, size.height);
+    if (shortSide >= 1080) return "1080p";
+    if (shortSide >= 720) return "720p";
+    return "480p";
+  }
+  return "720p";
+}
+
+function meaiccRatio(req) {
+  const fromParameters = trimmed(meaiccParameters(req).ratio);
+  if (/^\d+\s*:\s*\d+$/.test(fromParameters)) return fromParameters.replace(/\s+/g, "");
+  const raw = trimmed(req.ratio) || trimmed(req.aspect_ratio);
+  if (/^\d+\s*:\s*\d+$/.test(raw)) return raw.replace(/\s+/g, "");
+  const size = parseSize(req.size);
+  if (size) return size.width > size.height ? "16:9" : size.width < size.height ? "9:16" : "1:1";
+  return "16:9";
+}
+
+// 画布 / 桥接给的参考图字段名不统一，按固定顺序合并去重：
+// images[] -> image -> input_reference -> reference_images[] -> reference_image
+function meaiccImages(req) {
+  const out = [];
+  const push = function (value) {
+    const url = trimmed(value && typeof value === "object" ? value.url : value);
+    if (url && !out.includes(url)) out.push(url);
+  };
+  for (const value of [].concat(req.images || [])) push(value);
+  push(req.image);
+  push(req.input_reference);
+  for (const value of [].concat(req.reference_images || [])) push(value);
+  push(req.reference_image);
+  return out;
+}
+
+function meaiccMedia(req) {
+  const existing = req.input && Array.isArray(req.input.media) ? req.input.media : [];
+  if (existing.length) {
+    const kept = [];
+    for (const item of existing) {
+      const url = trimmed(item && typeof item === "object" ? item.url : item);
+      if (url) kept.push({ type: trimmed(item && item.type) || "reference_image", url: url });
+    }
+    if (kept.length) return kept;
+  }
+  const images = meaiccImages(req);
+  const framesMode = trimmed(req.mode) === "frames";
+  const media = [];
+  images.forEach(function (url, index) {
+    let type = index === 0 ? "first_frame" : "reference_image";
+    if (framesMode && index === 1) type = "last_frame";
+    media.push({ type: type, url: url });
+  });
+  for (const value of [].concat(req.reference_audios || [])) {
+    const url = trimmed(value && typeof value === "object" ? value.url : value);
+    if (url) media.push({ type: "reference_voice", url: url });
+  }
+  return media;
+}
+
+function meaiccSubmitBody(req, model) {
+  // prompt 认两种形状：画布原始顶层 prompt，以及已组装好的 input.prompt。
+  const nested = req.input && typeof req.input === "object" && !Array.isArray(req.input) ? trimmed(req.input.prompt) : "";
+  const prompt = trimmed(req.prompt) || nested;
+  const input = { prompt: prompt };
+  const media = meaiccMedia(req);
+  if (media.length) input.media = media;
+  return {
+    model: model,
+    prompt: prompt,
+    input: input,
+    parameters: { resolution: meaiccResolution(req), ratio: meaiccRatio(req), duration: meaiccSeconds(req) },
+  };
+}
+
+// decodeRequest 侧：只有 meaicc 命中时替换 intent 里的 requestBody。
+function meaiccRequest(ctx, req) {
+  if (!isMeaicc(ctx)) return null;
+  return meaiccSubmitBody(req, (ctx && (ctx.upstreamModel || ctx.model)) || "");
+}
+
+// buildSubmitRequest 侧：meaicc 走重组后的 body，其余上游保持原样。
 export function buildSubmitRequest(ctx) {
   const req = ctx.requestBody || {};
   if (!String(req.prompt || "").trim()) throw new Error("field prompt is required");
@@ -141,6 +280,10 @@ export function buildSubmitRequest(ctx) {
   if (action === "remix") {
     headers["Content-Type"] = "application/json";
     return { url: ctx.baseUrl + "/v1/videos/" + ctx.originTaskId + "/remix", method: "POST", headers, body: submissionValues(req, ctx.upstreamModel), action };
+  }
+  if (isMeaicc(ctx)) {
+    headers["Content-Type"] = "application/json";
+    return { url: ctx.baseUrl + "/v1/videos", method: "POST", headers, body: meaiccSubmitBody(req, ctx.upstreamModel) };
   }
   if ((ctx.files || []).length) {
     const parts = [];
@@ -155,7 +298,7 @@ export function buildSubmitRequest(ctx) {
     return { url: ctx.baseUrl + "/v1/videos", method: "POST", headers, bodyType: "multipart", parts };
   }
   headers["Content-Type"] = "application/json";
-  return { url: ctx.baseUrl + "/v1/videos", method: "POST", headers, body: submissionValues(req, ctx.upstreamModel) };
+  return { url: ctx.baseUrl + "/v1/videos", method: "POST", headers, body: meaiccRequest(ctx, req) || submissionValues(req, ctx.upstreamModel) };
 }
 
 export function parseSubmitResponse(ctx, resp) {
@@ -203,21 +346,31 @@ export function buildQueryRequest(ctx) {
   return { url: ctx.baseUrl + "/v1/videos/" + ctx.taskId, method: "GET", headers: { Authorization: "Bearer " + ctx.apiKey } };
 }
 
+// 上游状态映射：meaicc 用 RUNNING / SUCCEEDED / "FAILED: xxx"（大写），
+// 视频桥接 / 号池用 queued / in_progress / completed / failed。两套都认。
 export function parseTaskResult(ctx, body) {
-  const statuses = {
-    queued: "QUEUED",
-    pending: "QUEUED",
-    processing: "IN_PROGRESS",
-    in_progress: "IN_PROGRESS",
-    completed: "SUCCESS",
-    failed: "FAILURE",
-    cancelled: "FAILURE",
-  };
-  const mapped = statuses[body.status];
-  const result = { status: mapped || "UNKNOWN" };
-  if (!mapped) result.reason = "unrecognized status: " + String(body.status || "");
-  if (body.progress > 0 && body.progress < 100) result.progress = body.progress + "%";
-  if (result.status === "FAILURE") result.reason = body.error && body.error.message ? body.error.message : "task failed";
+  const data = body && typeof body === "object" ? body : {};
+  const raw = trimmed(data.status);
+  const result = { status: "UNKNOWN" };
+  if (/^(succeeded|success|completed|done)$/i.test(raw)) {
+    result.status = "SUCCESS";
+  } else if (/^(failed|cancel|cancelled|canceled)/i.test(raw)) {
+    result.status = "FAILURE";
+    result.reason = trimmed(raw.replace(/^failed\s*:?\s*/i, "")) || "task failed";
+  } else if (/^(queued|not_start|pending|created|submitted)$/i.test(raw)) {
+    result.status = "QUEUED";
+  } else if (/^(running|processing|in_?progress)$/i.test(raw)) {
+    result.status = "IN_PROGRESS";
+  } else {
+    result.reason = "unrecognized status: " + raw;
+  }
+  const progress = Number(data.progress);
+  if (Number.isFinite(progress) && progress > 0 && progress < 100) result.progress = progress + "%";
+  if (result.status === "FAILURE" && !result.reason) {
+    result.reason = data.error && data.error.message ? data.error.message : "task failed";
+  }
+  const url = artifactVideoURL(data);
+  if (url) result.url = url;
   return result;
 }
 
@@ -233,7 +386,7 @@ function artifactVideoURL(data) {
   let node = data && typeof data === "object" && !Array.isArray(data) ? data : {};
   for (let depth = 0; depth < 2; depth += 1) {
     const video = node.video && typeof node.video === "object" && !Array.isArray(node.video) ? node.video : {};
-    for (const candidate of [video.url, video.video_url, node.url, node.video_url]) {
+    for (const candidate of [video.url, video.video_url, node.url, node.video_url, node.object, node.output, node.play_url]) {
       const value = trimmed(candidate);
       if (/^https?:\/\//i.test(value)) return value;
     }
@@ -292,7 +445,7 @@ export const protocols = {
         kind: "submit",
         model: model,
         action: images.length || referenceImages.length ? "image_to_video" : "text_to_video",
-        requestBody: requestBody,
+        requestBody: meaiccRequest(ctx, requestBody) || requestBody,
       };
     },
     renderEvents: function (ctx, task, previousState) {
@@ -361,7 +514,7 @@ protocols.openai_video = {
         kind: "submit",
         model: ctx.model,
         action: req.input_reference || req.image || req.reference_images || req.reference_image ? "image_to_video" : "text_to_video",
-        requestBody: Object.assign({}, req, { model: ctx.model }),
+        requestBody: meaiccRequest(ctx, req) || Object.assign({}, req, { model: ctx.model }),
       };
     }
     const first = function (name) {
@@ -401,7 +554,7 @@ protocols.openai_video = {
       kind: "submit",
       model: ctx.model,
       action: hasInputReferenceFile || req.input_reference || req.image || req.reference_images || req.reference_image ? "image_to_video" : "text_to_video",
-      requestBody: Object.assign({}, req, { model: ctx.model }),
+      requestBody: meaiccRequest(ctx, req) || Object.assign({}, req, { model: ctx.model }),
     };
   },
   render: function (ctx, task) {
@@ -409,3 +562,4 @@ protocols.openai_video = {
     return legacyRenderers.openai_video(task);
   },
 };
+
