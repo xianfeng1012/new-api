@@ -3,7 +3,7 @@
 // 因此这些模型必须在此声明，才能解析出 seconds 字段并配置「按秒计费」。
 // 新增/改名桥接模型时同步更新此列表。
 const BRIDGE_VIDEO_MODELS = ["seedance_v2.0", "seedance_v2.0_std", "seedance_v2.5", "seedance-2.0", "seedance-2.5"];
-const MEAICC_VIDEO_MODELS = ["sd-2.5-c1"];
+const MEAICC_VIDEO_MODELS = ["sd-2.5-c1", "sd-2-c4"];
 
 export const meta = {
   apiVersion: 1,
@@ -14,7 +14,7 @@ export const meta = {
     en: "OpenAI Sora video generation (text-to-video, image-to-video, and remix)",
     zh: "OpenAI Sora 视频生成（文生视频、图生视频、remix）",
   },
-  version: "1.0.16",
+  version: "1.0.18",
   channelTypes: [55, 1], // OpenAI-type channels natively serve sora with the same wire format
   author: { name: "QuantumNous" },
   models: ["sora-2", "sora-2-pro"].concat(BRIDGE_VIDEO_MODELS, MEAICC_VIDEO_MODELS),
@@ -110,28 +110,40 @@ function responsesVideoText(ctx) {
   return '<video controls src="' + escaped + '"></video>';
 }
 
+// 出站时长归一化：不同画布工具/前置代理给的时长字段形状不一。
+// 顶层秒数缺失或像是占位值（<=1）时，依次从桥接带入的真值字段、duration、
+// metadata 里取真实时长；命中的值统一换算成「秒数字符串」。上限沿用任务时长
+// 上限（3600s），异常值不会放大。
+function outboundSeconds(req) {
+  const source = req && typeof req === "object" ? req : {};
+  const metadata = source.metadata && typeof source.metadata === "object" && !Array.isArray(source.metadata) ? source.metadata : {};
+  for (const candidate of [source.seconds, source._billing_seconds, source.duration, metadata.seconds, metadata.duration]) {
+    const value = Number(candidate);
+    if (Number.isFinite(value) && value > 1) return String(Math.min(value, 3600));
+  }
+  return undefined;
+}
+
+// 非 meaicc 上游的出站归一化（meaicc 走上面的 input/parameters 重组，不经过这里）。
+// 两条硬规则（2026-10-09 两次下游 400 后收敛）：
+// 1) 一律不发 duration —— 上游（New API 系）把它解析成整数字段，multipart 只能以
+//    字符串承载，出现即炸 invalid_json：cannot unmarshal string into ... .duration of type int；
+// 2) seconds 一律发字符串 —— 同族上游该字段是 string，发数字会炸
+//    cannot unmarshal number into ... .seconds of type string。
+// 只改发给上游的 body —— 计费倍率读的是 ctx.requestBody，不受影响。
 function requestValues(req, model) {
   const values = Object.assign({}, req || {});
   values.model = model;
+  delete values.duration;
+  const seconds = outboundSeconds(req);
+  if (seconds === undefined) delete values.seconds;
+  else values.seconds = seconds;
   return values;
 }
 
-// 出站参数归一化：不同画布工具/前置代理给的时长字段形状不一。
-// 顶层秒数缺失或像是占位值（<=1）时，依次从桥接带入的真值字段、duration、
-// metadata 里取真实时长，只改发给上游的 body —— 计费倍率读的是 ctx.requestBody，不受影响。
+// 兼容旧调用点：与 requestValues 共用同一条归一化路径。
 function submissionValues(req, model) {
-  const values = requestValues(req, model);
-  if (!(Number(req.seconds) > 1)) {
-    const metadata = req.metadata && typeof req.metadata === "object" ? req.metadata : {};
-    for (const candidate of [req._billing_seconds, req.duration, metadata.seconds, metadata.duration]) {
-      const value = Number(candidate);
-      if (Number.isFinite(value) && value > 1) {
-        values.seconds = value;
-        break;
-      }
-    }
-  }
-  return values;
+  return requestValues(req, model);
 }
 
 // ---------------------------------------------------------------------------
@@ -150,8 +162,8 @@ function submissionValues(req, model) {
 // 出站 body 会先由 protocols.*.decodeRequest 组装一次，再被 buildSubmitRequest
 // 走一遍，所以下面每个取值都同时认「画布原始字段」和「已组装好的 meaicc 形状」，
 // 保证重复执行不丢字段。
-const MEAICC_DURATION_MIN = 4;
-const MEAICC_DURATION_MAX = 30;
+const MEAICC_DURATION_MIN = 5;
+const MEAICC_DURATION_MAX = 15;
 
 function isMeaicc(ctx) {
   // 上游域名或模型名任一命中即按 meaicc 形状出站：渠道换域名、走代理，
@@ -209,25 +221,67 @@ function meaiccRatio(req) {
   return "16:9";
 }
 
-// 画布 / 桥接给的参考图字段名不统一，按固定顺序合并去重：
-// images[] -> image -> input_reference -> reference_images[] -> reference_image
-function meaiccImages(req) {
-  const out = [];
-  const push = function (value) {
+// 画布 / 桥接给的参考图字段名不统一，按固定顺序合并去重，并保留字段名：
+// first_frame / last_frame -> images[] -> image -> input_reference -> reference_images[] -> reference_image
+function meaiccImageEntries(req) {
+  const entries = [];
+  const seen = {};
+  const push = function (value, name) {
     const url = trimmed(value && typeof value === "object" ? value.url : value);
-    if (url && !out.includes(url)) out.push(url);
+    if (!url || seen[url]) return;
+    seen[url] = true;
+    entries.push({ name: trimmed(name), url: url });
   };
-  for (const value of [].concat(req.images || [])) push(value);
-  push(req.image);
-  push(req.input_reference);
-  for (const value of [].concat(req.reference_images || [])) push(value);
-  push(req.reference_image);
-  return out;
+  push(req.first_frame, "first_frame");
+  push(req.last_frame, "last_frame");
+  for (const value of [].concat(req.images || [])) push(value, "images");
+  push(req.image, "image");
+  push(req.input_reference, "input_reference");
+  for (const value of [].concat(req.reference_images || [])) push(value, "reference_images");
+  push(req.reference_image, "reference_image");
+  return entries;
 }
 
-function meaiccMedia(req) {
-  const existing = req.input && Array.isArray(req.input.media) ? req.input.media : [];
-  if (existing.length) {
+// 画布上传的图片是 multipart 文件（没有 URL）。宿主支持把
+// {"__fileRef":…, "encoding":"dataUrl"} 占位符内联成 data:image/png;base64,…，
+// 而 meaicc 的 input.media[].url 实测接受 data: URL（文档只要求 URL 地址，
+// 但参考图/首帧图它都能直接内联），所以这里把上传字节交给宿主内联。
+function meaiccFileEntries(ctx) {
+  const entries = [];
+  for (const file of (ctx && ctx.files) || []) {
+    const ref = trimmed(file && file.ref);
+    if (!ref) continue;
+    entries.push({
+      name: trimmed(file.field),
+      fileRef: ref,
+      mimeType: trimmed(file.mimeType),
+      filename: trimmed(file.filename),
+    });
+  }
+  return entries;
+}
+
+function meaiccFrameType(name) {
+  const bare = trimmed(name).toLowerCase().replace(/\[\]$/, "");
+  if (bare === "first_frame") return "first_frame";
+  if (bare === "last_frame") return "last_frame";
+  return "";
+}
+
+// 单图 = 图生视频（first_frame）；多图 = 参考生视频（reference_image，提示词用图1/图2 指代）；
+// 显式 first_frame / last_frame 字段名或 mode=frames 一律照办。
+function meaiccMediaType(entry, index, total, framesMode) {
+  const explicit = meaiccFrameType(entry.name);
+  if (explicit) return explicit;
+  if (framesMode && index < 2) return index === 0 ? "first_frame" : "last_frame";
+  return total > 1 ? "reference_image" : "first_frame";
+}
+
+function meaiccMedia(req, ctx) {
+  const entries = meaiccImageEntries(req).concat(meaiccFileEntries(ctx));
+  if (!entries.length) {
+    // 客户端直接按 meaicc 文档形状提交（input.media 已组装好）时原样保留。
+    const existing = req.input && Array.isArray(req.input.media) ? req.input.media : [];
     const kept = [];
     for (const item of existing) {
       const url = trimmed(item && typeof item === "object" ? item.url : item);
@@ -235,13 +289,17 @@ function meaiccMedia(req) {
     }
     if (kept.length) return kept;
   }
-  const images = meaiccImages(req);
   const framesMode = trimmed(req.mode) === "frames";
   const media = [];
-  images.forEach(function (url, index) {
-    let type = index === 0 ? "first_frame" : "reference_image";
-    if (framesMode && index === 1) type = "last_frame";
-    media.push({ type: type, url: url });
+  entries.forEach(function (entry, index) {
+    const type = meaiccMediaType(entry, index, entries.length, framesMode);
+    if (entry.fileRef) {
+      const placeholder = { __fileRef: entry.fileRef, encoding: "dataUrl" };
+      if (entry.mimeType) placeholder.mimeType = entry.mimeType;
+      media.push({ type: type, url: placeholder });
+    } else {
+      media.push({ type: type, url: entry.url });
+    }
   });
   for (const value of [].concat(req.reference_audios || [])) {
     const url = trimmed(value && typeof value === "object" ? value.url : value);
@@ -250,12 +308,12 @@ function meaiccMedia(req) {
   return media;
 }
 
-function meaiccSubmitBody(req, model) {
+function meaiccSubmitBody(req, model, ctx) {
   // prompt 认两种形状：画布原始顶层 prompt，以及已组装好的 input.prompt。
   const nested = req.input && typeof req.input === "object" && !Array.isArray(req.input) ? trimmed(req.input.prompt) : "";
   const prompt = trimmed(req.prompt) || nested;
   const input = { prompt: prompt };
-  const media = meaiccMedia(req);
+  const media = meaiccMedia(req, ctx);
   if (media.length) input.media = media;
   return {
     model: model,
@@ -268,7 +326,7 @@ function meaiccSubmitBody(req, model) {
 // decodeRequest 侧：只有 meaicc 命中时替换 intent 里的 requestBody。
 function meaiccRequest(ctx, req) {
   if (!isMeaicc(ctx)) return null;
-  return meaiccSubmitBody(req, (ctx && (ctx.upstreamModel || ctx.model)) || "");
+  return meaiccSubmitBody(req, (ctx && (ctx.upstreamModel || ctx.model)) || "", ctx);
 }
 
 // buildSubmitRequest 侧：meaicc 走重组后的 body，其余上游保持原样。
@@ -283,7 +341,7 @@ export function buildSubmitRequest(ctx) {
   }
   if (isMeaicc(ctx)) {
     headers["Content-Type"] = "application/json";
-    return { url: ctx.baseUrl + "/v1/videos", method: "POST", headers, body: meaiccSubmitBody(req, ctx.upstreamModel) };
+    return { url: ctx.baseUrl + "/v1/videos", method: "POST", headers, body: meaiccSubmitBody(req, ctx.upstreamModel, ctx) };
   }
   if ((ctx.files || []).length) {
     const parts = [];

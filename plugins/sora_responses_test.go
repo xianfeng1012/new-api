@@ -218,7 +218,7 @@ func TestSoraMeaiccUpstreamRequestShape(t *testing.T) {
 		}, body["input"])
 		parameters, ok := body["parameters"].(map[string]any)
 		require.True(t, ok)
-		assert.Equal(t, float64(30), parameters["duration"])
+		assert.Equal(t, float64(15), parameters["duration"], "the vendor documents 5-15s")
 		assert.Equal(t, "9:16", parameters["ratio"])
 		assert.Equal(t, "720p", parameters["resolution"])
 	})
@@ -244,3 +244,126 @@ func TestSoraMeaiccUpstreamRequestShape(t *testing.T) {
 		assert.Nil(t, body["parameters"])
 	})
 }
+
+// 参考图回归：画布把参考图当 multipart 文件上传，没有 URL；而 meaicc 的
+// input.media[].url 只认 URL（实测接受 data: URL）。宿主提供了
+// {"__fileRef":…,"encoding":"dataUrl"} 占位符内联机制，插件必须用它把上传字节
+// 变成 media —— 历史表现是「提交成功但完全没有参考图」。
+func TestSoraMeaiccReferenceImagesFromUploads(t *testing.T) {
+	source, err := builtinplugins.Source("sora")
+	require.NoError(t, err)
+	registry := jsplugin.NewRegistry()
+	plugin, err := registry.RegisterFactory(source, jsplugin.Options{Key: "sora"})
+	require.NoError(t, err)
+
+	submit := func(t *testing.T, ctx map[string]any) map[string]any {
+		t.Helper()
+		value, callErr := plugin.Engine.Call(t.Context(), "buildSubmitRequest", ctx)
+		require.NoError(t, callErr)
+		encoded, marshalErr := common.Marshal(value)
+		require.NoError(t, marshalErr)
+		var descriptor map[string]any
+		require.NoError(t, common.Unmarshal(encoded, &descriptor))
+		return descriptor
+	}
+	files := func(count int) []any {
+		out := make([]any, 0, count)
+		for index := 0; index < count; index++ {
+			out = append(out, map[string]any{
+				"ref":      "input_reference[]:" + string(rune('0'+index)),
+				"field":    "input_reference[]",
+				"filename": "reference.png",
+				"mimeType": "image/png",
+			})
+		}
+		return out
+	}
+
+	// 渠道 base_url 换成抓包/代理域名也要命中 meaicc 形状（按模型名识别）。
+	t.Run("three uploads become reference_image dataUrl placeholders", func(t *testing.T) {
+		descriptor := submit(t, map[string]any{
+			"requestBody": map[string]any{
+				"model": "sd-2-c4", "prompt": "a cat", "seconds": "15", "size": "1280x720",
+			},
+			"model": "sd-2-c4", "upstreamModel": "sd-2-c4", "action": "image_to_video",
+			"apiKey": "sk-test", "baseUrl": "http://meaicc-capture:18888", "files": files(3),
+		})
+		body, ok := descriptor["body"].(map[string]any)
+		require.True(t, ok)
+		input, ok := body["input"].(map[string]any)
+		require.True(t, ok)
+		media, ok := input["media"].([]any)
+		require.True(t, ok)
+		require.Len(t, media, 3)
+		for index, item := range media {
+			entry, ok := item.(map[string]any)
+			require.True(t, ok)
+			assert.Equal(t, "reference_image", entry["type"], "multiple uploads are references, not a first frame")
+			url, ok := entry["url"].(map[string]any)
+			require.True(t, ok, "uploads must go out as an inline placeholder")
+			assert.Equal(t, "input_reference[]:"+string(rune('0'+index)), url["__fileRef"])
+			assert.Equal(t, "dataUrl", url["encoding"])
+			assert.Equal(t, "image/png", url["mimeType"])
+		}
+		parameters, ok := body["parameters"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, float64(15), parameters["duration"])
+	})
+
+	t.Run("a single upload stays a first frame", func(t *testing.T) {
+		descriptor := submit(t, map[string]any{
+			"requestBody": map[string]any{"model": "sd-2-c4", "prompt": "a cat", "seconds": "5"},
+			"model": "sd-2-c4", "upstreamModel": "sd-2-c4", "action": "image_to_video",
+			"apiKey": "sk-test", "baseUrl": "https://api.meaicc.com", "files": files(1),
+		})
+		body, ok := descriptor["body"].(map[string]any)
+		require.True(t, ok)
+		media, ok := body["input"].(map[string]any)["media"].([]any)
+		require.True(t, ok)
+		require.Len(t, media, 1)
+		assert.Equal(t, "first_frame", media[0].(map[string]any)["type"])
+	})
+}
+
+// 非 meaicc 上游（视频桥接等）的出站回归：一律不发 duration。
+// multipart 只能以字符串承载该字段，而 New API 系上游把它解析成整数，
+// 出现即 400 `json: cannot unmarshal string into Go struct field .Alias.duration of type int`。
+func TestSoraBridgeMultipartDropsDuration(t *testing.T) {
+	source, err := builtinplugins.Source("sora")
+	require.NoError(t, err)
+	registry := jsplugin.NewRegistry()
+	plugin, err := registry.RegisterFactory(source, jsplugin.Options{Key: "sora"})
+	require.NoError(t, err)
+
+	value, callErr := plugin.Engine.Call(t.Context(), "buildSubmitRequest", map[string]any{
+		"requestBody": map[string]any{
+			"model": "seedance_v2.5", "prompt": "a cat", "seconds": "15", "duration": 15, "size": "1280x720",
+		},
+		"model": "seedance_v2.5", "upstreamModel": "Dreamina Seedance 2.5", "action": "image_to_video",
+		"apiKey": "sk-test", "baseUrl": "http://172.17.0.1:18084",
+		"files": []any{map[string]any{"ref": "input_reference[]:0", "field": "input_reference[]",
+			"filename": "a.png", "mimeType": "image/png"}},
+	})
+	require.NoError(t, callErr)
+	encoded, marshalErr := common.Marshal(value)
+	require.NoError(t, marshalErr)
+	var descriptor map[string]any
+	require.NoError(t, common.Unmarshal(encoded, &descriptor))
+
+	assert.Equal(t, "multipart", descriptor["bodyType"])
+	parts, ok := descriptor["parts"].([]any)
+	require.True(t, ok)
+	names := make([]string, 0, len(parts))
+	for _, part := range parts {
+		entry, ok := part.(map[string]any)
+		require.True(t, ok)
+		name, _ := entry["name"].(string)
+		names = append(names, name)
+		if name == "seconds" {
+			assert.Equal(t, "15", entry["value"], "seconds must stay a string for New API shaped upstreams")
+		}
+	}
+	assert.NotContains(t, names, "duration")
+	assert.Contains(t, names, "seconds")
+}
+
