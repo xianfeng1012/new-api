@@ -2,7 +2,10 @@
 // 渠道按类型选中本插件，但计费配置（计费与支付 → 模型定价）按模型名解析 usage schema，
 // 因此这些模型必须在此声明，才能解析出 seconds 字段并配置「按秒计费」。
 // 新增/改名桥接模型时同步更新此列表。
-const BRIDGE_VIDEO_MODELS = ["seedance_v2.0_std", "seedance_v2.5"];
+// 线上桥接实际投入的名字是客户端名 seedance_v2.0 / seedance_v2.5，「按秒」渠道再把它们
+// model_mapping 到上游名 seedance-2.0 / seedance-2.5；计费表达式按映射后的模型名解析
+// usage schema，因此这一组名字都要声明，缺一个该模型就配不出 u("seconds") 按秒单价。
+const BRIDGE_VIDEO_MODELS = ["seedance_v2.0", "seedance_v2.0_std", "seedance_v2.5", "seedance-2.0", "seedance-2.5"];
 
 export const meta = {
   apiVersion: 1,
@@ -13,7 +16,7 @@ export const meta = {
     en: "OpenAI Sora video generation (text-to-video, image-to-video, and remix)",
     zh: "OpenAI Sora 视频生成（文生视频、图生视频、remix）",
   },
-  version: "1.1.2",
+  version: "1.1.3",
   channelTypes: [55, 1], // OpenAI-type channels natively serve sora with the same wire format
   author: { name: "QuantumNous" },
   models: ["sora-2", "sora-2-pro"].concat(BRIDGE_VIDEO_MODELS),
