@@ -5,12 +5,14 @@ import (
 	"context"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	commonRelay "github.com/QuantumNous/new-api/relay/common"
+	"gorm.io/gorm"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 )
 
@@ -140,6 +142,18 @@ type TaskPrivateData struct {
 	// and every retrieval surface treats the task as not found. The zero
 	// value keeps historical rows retained and retrievable.
 	ResultDiscarded bool `json:"result_discarded,omitempty"`
+	// ---- 视频超分（生成后自动后处理）链路 ----
+	// OriginResultURL 保存超分前的原片地址：客户端只看到超分结果，管理员两侧都能看。
+	OriginResultURL string `json:"origin_result_url,omitempty"`
+	// EnhanceParentTaskID 仅出现在子任务上，指向它所属的原视频任务。
+	EnhanceParentTaskID string `json:"enhance_parent_task_id,omitempty"`
+	// EnhanceChildTaskID / EnhanceSubmittedAt 只出现在原任务上，用于防重复提交。
+	EnhanceChildTaskID string `json:"enhance_child_task_id,omitempty"`
+	EnhanceSubmittedAt int64  `json:"enhance_submitted_at,omitempty"`
+	EnhanceToolVersion string `json:"enhance_tool_version,omitempty"`
+	// EnhancePublishedAt 在「超分片已挂成客户可见产物」或「超分失败回落原片」时写入。
+	// 只要它还是 0，客户侧就必须继续看到「处理中」，否则画布会在超分完成前拿到原片。
+	EnhancePublishedAt int64 `json:"enhance_published_at,omitempty"`
 }
 
 type TaskExecutionSnapshot struct {
@@ -256,6 +270,8 @@ type SyncTaskQueryParams struct {
 	StartTimestamp int64
 	EndTimestamp   int64
 	UserIDs        []int
+	// ExcludePlatforms 把内部子任务（如视频超分子任务）挡在客户视角之外。
+	ExcludePlatforms []constant.TaskPlatform
 }
 
 func InitTask(platform constant.TaskPlatform, relayInfo *commonRelay.RelayInfo) *Task {
@@ -318,6 +334,9 @@ func TaskGetAllUserTask(userId int, startIdx int, num int, queryParams SyncTaskQ
 	}
 	if queryParams.Platform != "" {
 		query = query.Where("platform = ?", queryParams.Platform)
+	}
+	if len(queryParams.ExcludePlatforms) > 0 {
+		query = query.Where("platform NOT IN ?", queryParams.ExcludePlatforms)
 	}
 	if queryParams.StartTimestamp != 0 {
 		// 假设您已将前端传来的时间戳转换为数据库所需的时间格式，并处理了时间戳的验证和解析
@@ -652,6 +671,9 @@ func TaskCountAllUserTask(userId int, queryParams SyncTaskQueryParams) int64 {
 	if queryParams.Platform != "" {
 		query = query.Where("platform = ?", queryParams.Platform)
 	}
+	if len(queryParams.ExcludePlatforms) > 0 {
+		query = query.Where("platform NOT IN ?", queryParams.ExcludePlatforms)
+	}
 	if queryParams.StartTimestamp != 0 {
 		query = query.Where("submit_time >= ?", queryParams.StartTimestamp)
 	}
@@ -661,6 +683,77 @@ func TaskCountAllUserTask(userId int, queryParams SyncTaskQueryParams) int64 {
 	_ = query.Count(&total).Error
 	return total
 }
+// GetTaskByID loads one task row by primary key.
+func GetTaskByID(id int64) (*Task, error) {
+	if id <= 0 {
+		return nil, nil
+	}
+	task := &Task{}
+	if err := DB.First(task, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return task, nil
+}
+
+// EnhancePendingMaxSeconds bounds how long a finished video task may stay in the
+// customer-visible "still processing" state while its post-processing child is
+// missing or never settles. Beyond it the original video is released, so a lost
+// child row can never freeze a customer's task forever.
+const EnhancePendingMaxSeconds int64 = 3600
+
+// IsEnhancePending reports whether this task's customer-visible artifact must
+// still wait for its post-processing child: the task finished successfully, a
+// child was submitted, and the enhanced result has not been published yet.
+func (t *Task) IsEnhancePending() bool {
+	if t == nil || t.Status != TaskStatusSuccess {
+		return false
+	}
+	submittedAt := t.PrivateData.EnhanceSubmittedAt
+	if submittedAt <= 0 || t.PrivateData.EnhancePublishedAt > 0 {
+		return false
+	}
+	return time.Now().Unix()-submittedAt < EnhancePendingMaxSeconds
+}
+
+// UpdateTaskPrivateData persists only the private_data JSON column.
+func UpdateTaskPrivateData(id int64, privateData *TaskPrivateData) error {
+	if id <= 0 || privateData == nil {
+		return nil
+	}
+	return DB.Model(&Task{}).Where("id = ?", id).Update("private_data", privateData).Error
+}
+
+// UpdateTaskResultURL overwrites the stored result URL of one task.
+func UpdateTaskResultURL(task *Task, resultURL string) error {
+	if task == nil || task.ID <= 0 {
+		return nil
+	}
+	task.PrivateData.ResultURL = resultURL
+	return UpdateTaskPrivateData(task.ID, &task.PrivateData)
+}
+
+// UpdateTaskDataAndPrivateData persists the upstream snapshot and private state
+// of one task, used when the post-processing step replaces the visible artifact.
+func UpdateTaskDataAndPrivateData(id int64, data json.RawMessage, privateData *TaskPrivateData) error {
+	if id <= 0 {
+		return nil
+	}
+	updates := map[string]any{}
+	if len(data) > 0 {
+		updates["data"] = data
+	}
+	if privateData != nil {
+		updates["private_data"] = privateData
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	return DB.Model(&Task{}).Where("id = ?", id).Updates(updates).Error
+}
+
 func (t *Task) ToOpenAIVideo() *dto.OpenAIVideo {
 	openAIVideo := dto.NewOpenAIVideo()
 	openAIVideo.ID = t.TaskID

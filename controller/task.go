@@ -92,6 +92,11 @@ func GetDashboardTaskArtifacts(c *gin.Context) {
 
 func writeTaskArtifacts(c *gin.Context, task *model.Task, dashboard bool) {
 	c.Header("Cache-Control", "private, no-store")
+	// 超分进行中：不列产物，避免客户侧拿到原片的下载入口（成片就绪后本接口自然恢复）。
+	if task.IsEnhancePending() {
+		c.JSON(http.StatusOK, gin.H{"task_id": task.TaskID, "artifacts": []taskArtifactResponse{}})
+		return
+	}
 	artifacts, err := projectTaskArtifacts(task)
 	if err != nil {
 		writeTaskArtifactProjectionError(c, err)
@@ -324,12 +329,22 @@ func TaskArtifactContent(c *gin.Context) {
 		return
 	}
 	artifactKey := strings.TrimSpace(c.Param("artifact_key"))
+	enhanceSource := artifactKey == service.EnhanceSourceArtifactKey
+	if enhanceSource {
+		// 超分链自己取源片：对外仍按 video 提供，但不走「超分中」门禁。
+		artifactKey = "video"
+	}
 	if !taskArtifactKeyPattern.MatchString(artifactKey) || !task.ResultRetrievable() {
 		writeTaskArtifactError(c, http.StatusNotFound, "artifact_not_found", "Task or artifact not found")
 		return
 	}
 	if task.Status != model.TaskStatusSuccess {
 		writeTaskArtifactError(c, http.StatusConflict, "artifact_not_ready", "Task artifacts are not ready")
+		return
+	}
+	// 超分进行中：原片还不能交付（客户侧只该拿到超分后的成片）。
+	if task.IsEnhancePending() && !enhanceSource {
+		writeTaskArtifactError(c, http.StatusConflict, "artifact_not_ready", "Video super resolution is still running")
 		return
 	}
 	if !taskHasPluginExecution(task) {
@@ -425,6 +440,11 @@ func GetUserTask(c *gin.Context) {
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	queryParams := model.SyncTaskQueryParams{Platform: constant.TaskPlatform(c.Query("platform")), TaskID: c.Query("task_id"), Status: c.Query("status"), Action: c.Query("action"), StartTimestamp: startTimestamp, EndTimestamp: endTimestamp}
+	// 视频超分子任务对客户隐藏（客户只看到自己那条视频任务，产物已指向超分片）；
+	// 管理员视角保留两条，便于对照原片与超分片。
+	if c.GetInt("role") < common.RoleAdminUser {
+		queryParams.ExcludePlatforms = []constant.TaskPlatform{service.EnhanceChildPlatform}
+	}
 	items := model.TaskGetAllUserTask(userID, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), queryParams)
 	pageInfo.SetTotal(int(model.TaskCountAllUserTask(userID, queryParams)))
 	pageInfo.SetItems(tasksToDto(items, false, common.RoleCommonUser))
@@ -461,6 +481,15 @@ func tasksToDto(tasks []*model.Task, fillUser bool, viewerRole int) []*dto.TaskD
 				item.FailReason = ""
 			}
 		}
+		// 超分进行中：客户侧看到的是「还在处理」，且不给任何原片入口；
+		// 管理员照常看到真实状态与两侧地址（下面 adminInfo 里带 origin_result_url）。
+		if task.IsEnhancePending() && viewerRole < common.RoleAdminUser {
+			item.Status = string(model.TaskStatusInProgress)
+			item.Progress = "99%"
+			item.ResultURL = ""
+			item.Data = nil
+			item.LegacyVideoAvailable = false
+		}
 		if viewerRole >= common.RoleAdminUser {
 			adminInfo := &dto.TaskAdminInfo{}
 			if execution := task.PrivateData.Execution; execution != nil {
@@ -480,7 +509,12 @@ func tasksToDto(tasks []*model.Task, fillUser bool, viewerRole int) []*dto.TaskD
 					}
 				}
 			}
-			if adminInfo.RequestID != "" || adminInfo.RequestPath != "" || adminInfo.TaskPlugin != nil {
+			adminInfo.OriginResultURL = task.PrivateData.OriginResultURL
+			adminInfo.EnhanceChildTaskID = task.PrivateData.EnhanceChildTaskID
+			adminInfo.EnhancePending = task.IsEnhancePending()
+			adminInfo.EnhancePublishedAt = task.PrivateData.EnhancePublishedAt
+			if adminInfo.RequestID != "" || adminInfo.RequestPath != "" || adminInfo.TaskPlugin != nil ||
+				adminInfo.OriginResultURL != "" || adminInfo.EnhanceChildTaskID != "" {
 				item.AdminInfo = adminInfo
 			}
 		}

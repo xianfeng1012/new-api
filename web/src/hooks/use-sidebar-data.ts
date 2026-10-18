@@ -28,6 +28,7 @@ import {
   ListTodo,
   MessageSquare,
   PlugZap,
+  Sparkles,
   Radio,
   ServerCog,
   Settings,
@@ -167,6 +168,12 @@ export function useSidebarData(): SidebarData {
             title: t('Task Plugins'),
             url: '/task-plugins',
             icon: PlugZap,
+            requiredRole: ROLE.SUPER_ADMIN,
+          },
+          {
+            title: t('Video Enhance'),
+            url: '/video-enhance',
+            icon: Sparkles,
             requiredRole: ROLE.SUPER_ADMIN,
           },
           {

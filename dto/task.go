@@ -87,6 +87,12 @@ type TaskAdminInfo struct {
 	RequestID   string          `json:"request_id,omitempty"`
 	RequestPath string          `json:"request_path,omitempty"`
 	TaskPlugin  *TaskPluginInfo `json:"task_plugin,omitempty"`
+	// ---- 视频超分链路（只给管理员）----
+	// OriginResultURL 是超分前的原片地址：客户侧只交付超分片，管理员两侧都能看。
+	OriginResultURL    string `json:"origin_result_url,omitempty"`
+	EnhanceChildTaskID string `json:"enhance_child_task_id,omitempty"`
+	EnhancePending     bool   `json:"enhance_pending,omitempty"`
+	EnhancePublishedAt int64  `json:"enhance_published_at,omitempty"`
 }
 
 type TaskRootInfo struct {

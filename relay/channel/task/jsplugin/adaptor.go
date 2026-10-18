@@ -895,6 +895,13 @@ func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {
 	// Keep provider extensions intact while the host owns the public task's
 	// identity and lifecycle, including completion timestamps after settlement.
 	host := task.ToOpenAIVideo()
+	// 超分进行中：客户侧只能看到「处理中」，否则画布会在超分片就绪前把原片拉走
+	// （父任务行此时已经是 SUCCESS，下面那几行覆盖会把它写成 completed）。
+	if task.IsEnhancePending() {
+		host.Status = "in_progress"
+		host.SetProgressStr("99%")
+		host.CompletedAt = 0
+	}
 	rendered["id"] = host.ID
 	rendered["object"] = host.Object
 	delete(rendered, "task_id")

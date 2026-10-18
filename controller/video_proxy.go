@@ -81,6 +81,11 @@ func VideoProxy(c *gin.Context) {
 			fmt.Sprintf("Task is not completed yet, current status: %s", task.Status))
 		return
 	}
+	// 超分进行中：不要把原片交出去 —— 客户只应拿到超分后的成片。
+	if task.IsEnhancePending() {
+		videoProxyError(c, http.StatusConflict, "artifact_not_ready", "Video super resolution is still running")
+		return
+	}
 
 	var descriptor *relaychannel.TaskContentRequest
 	if taskHasPluginExecution(task) {

@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var expectedKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "sora", "sunoapi", "vertex-ai", "vidu"}
+var expectedKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "mediakit", "sora", "sunoapi", "vertex-ai", "vidu"}
 
 func TestBuiltInVendorPluginsDeclareNativeRoutesAndLegacyChannelTypes(t *testing.T) {
 	generation := jsplugin.DefaultRegistry.Generation()
@@ -132,7 +132,10 @@ func TestBuiltInTaskPluginResponsesAndUsageContracts(t *testing.T) {
 }
 
 func TestBuiltInResponsesDecodersEchoChannelMappedAlias(t *testing.T) {
-	bodyOverrides := map[string]map[string]any{}
+	// 需要视频地址才能提交的插件在这里给出等价输入（模型名仍用被测别名）。
+	bodyOverrides := map[string]map[string]any{
+		"mediakit": {"model": "alias-under-test", "input": "https://example.com/source.mp4"},
+	}
 	for _, key := range expectedKeys {
 		t.Run(key, func(t *testing.T) {
 			source, sourceErr := Source(key)

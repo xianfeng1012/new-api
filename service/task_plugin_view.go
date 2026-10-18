@@ -29,6 +29,22 @@ func BuildTaskPluginView(task *model.Task) (dto.TaskView, error) {
 		}
 		view.Data = replacePrivateTaskID(view.Data, task.PrivateData.UpstreamTaskID, task.TaskID)
 	}
+	// 超分进行中：客户侧（画布、客户后台取任务）只能看到「还在处理」的最小信封。
+	// 否则这些接口会带着「已完成 + 原片直链」返回，画布会在超分片就绪前就把原片拉走。
+	if task.IsEnhancePending() {
+		view.Status = string(model.TaskStatusInProgress)
+		view.Progress = "99%"
+		view.FailReason = ""
+		view.FinishedAt = 0
+		view.Data = map[string]any{
+			"id":         task.TaskID,
+			"object":     "video",
+			"model":      task.Properties.OriginModelName,
+			"status":     "in_progress",
+			"progress":   99,
+			"created_at": createdAt,
+		}
+	}
 	return view, nil
 }
 
