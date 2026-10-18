@@ -51,21 +51,32 @@ export function ModelDeleteDialog(props: ModelDeleteDialogProps) {
   )
   const [removePricing, setRemovePricing] = useState(false)
   const [removeFromChannels, setRemoveFromChannels] = useState(false)
+  // 只存在于渠道（没有元数据行，列表里 id=0）的模型只能通过「从渠道移除」删除。
+  const ids = props.models
+    .filter((model) => model.id > 0)
+    .map((model) => model.id)
+  const names = props.models
+    .filter((model) => !(model.id > 0))
+    .map((model) => model.model_name)
+  const channelOnly = names.length > 0
+  const effectiveRemoveFromChannels =
+    channelOnly || (removeFromChannels && supportsChannelRemoval)
   const client = useQueryClient()
   const mutation = useMutation({
     mutationFn: async () => {
-      const ids = props.models.map((model) => model.id)
       const response =
-        ids.length === 1
+        props.models.length === 1
           ? await deleteModel(
-              ids[0],
-              removeFromChannels && supportsChannelRemoval,
-              removePricing && canEditPricing
+              ids[0] ?? 0,
+              effectiveRemoveFromChannels,
+              removePricing && canEditPricing,
+              names[0]
             )
           : await deleteModels(
               ids,
-              removeFromChannels && supportsChannelRemoval,
-              removePricing && canEditPricing
+              effectiveRemoveFromChannels,
+              removePricing && canEditPricing,
+              names
             )
       if (!response.success) {
         throw createServerError(response, t('Failed to delete model'))
@@ -114,8 +125,10 @@ export function ModelDeleteDialog(props: ModelDeleteDialogProps) {
           <Checkbox
             id={checkboxId}
             className='mt-0.5'
-            checked={removeFromChannels && supportsChannelRemoval}
-            disabled={mutation.isPending || !supportsChannelRemoval}
+            checked={effectiveRemoveFromChannels}
+            disabled={
+              mutation.isPending || !supportsChannelRemoval || channelOnly
+            }
             onCheckedChange={(checked) =>
               setRemoveFromChannels(checked === true)
             }
@@ -125,6 +138,13 @@ export function ModelDeleteDialog(props: ModelDeleteDialogProps) {
             {!supportsChannelRemoval && (
               <span className='text-muted-foreground text-xs font-normal'>
                 {t('Only available for exact matching')}
+              </span>
+            )}
+            {channelOnly && (
+              <span className='text-muted-foreground text-xs font-normal'>
+                {t(
+                  'Models that exist only in channels are removed from every channel that serves them.'
+                )}
               </span>
             )}
           </Label>

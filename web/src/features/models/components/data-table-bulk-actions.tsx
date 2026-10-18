@@ -245,7 +245,6 @@ export function DataTableBulkActions<TData>({
               <Button
                 variant='destructive'
                 size='icon'
-                disabled={hasMissingMetadata}
                 onClick={() => setShowDeleteConfirm(true)}
                 className='size-8'
                 aria-label={t('Delete selected models')}
@@ -258,11 +257,7 @@ export function DataTableBulkActions<TData>({
           </TooltipTrigger>
           <TooltipContent>
             <p>
-              {t(
-                hasMissingMetadata
-                  ? 'Add metadata to all selected models first.'
-                  : 'Delete selected models'
-              )}
+              {t('Delete selected models')}
             </p>
           </TooltipContent>
         </Tooltip>

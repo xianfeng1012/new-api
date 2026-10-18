@@ -61,6 +61,23 @@ function mount(batch = false) {
   )
   return { onSuccess, invalidate }
 }
+function mountChannelOnly() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  })
+  const onSuccess = vi.fn()
+  render(
+    <QueryClientProvider client={client}>
+      <ModelDeleteDialog
+        models={[{ id: 0, model_name: 'channel-only-model', name_rule: 0 }]}
+        onClose={() => {}}
+        onSuccess={onSuccess}
+      />
+    </QueryClientProvider>
+  )
+  return { onSuccess }
+}
+
 afterEach(() => {
   cleanup()
   useAuthStore.getState().auth.reset()
@@ -130,6 +147,34 @@ describe('model deletion', () => {
       remove_pricing: false,
     })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['channels'] })
+  })
+
+  it('deletes channel-only models by name and forces channel removal', async () => {
+    const remove = vi.spyOn(api, 'delete').mockResolvedValue({
+      data: {
+        success: true,
+        data: { deleted_count: 1, updated_channels: 1 },
+      },
+    })
+    const { onSuccess } = mountChannelOnly()
+    const user = userEvent.setup()
+    const checkbox = screen.getByRole('checkbox', {
+      name: /Also remove from all channels/,
+    })
+    expect(checkbox).toBeChecked()
+    expect(checkbox).toHaveAttribute('aria-disabled', 'true')
+    expect(
+      screen.getByText(/Models that exist only in channels are removed/)
+    ).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(onSuccess).toHaveBeenCalledOnce())
+    expect(remove).toHaveBeenCalledWith('/api/models/0', {
+      params: {
+        remove_from_channels: true,
+        remove_pricing: false,
+        model_name: 'channel-only-model',
+      },
+    })
   })
 
   it('disables dismissal and repeated submission while a single removal is pending', async () => {

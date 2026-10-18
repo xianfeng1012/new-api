@@ -51,6 +51,34 @@ type OpenAIModel struct {
 	Parent string `json:"parent"`
 }
 
+// UnmarshalJSON tolerates OpenAI-compatible upstreams that return numeric model
+// IDs (e.g. {"data":[{"id":1}]}). The OpenAI schema declares a string, so a
+// number is normalized to its decimal text instead of failing the whole list.
+func (m *OpenAIModel) UnmarshalJSON(data []byte) error {
+	type plain OpenAIModel
+	var aux struct {
+		ID any `json:"id"`
+		*plain
+	}
+	aux.plain = (*plain)(m)
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	switch v := aux.ID.(type) {
+	case nil:
+		m.ID = ""
+	case string:
+		m.ID = v
+	case float64:
+		m.ID = strconv.FormatFloat(v, 'f', -1, 64)
+	case json.Number:
+		m.ID = v.String()
+	default:
+		return fmt.Errorf("model id must be a string or number, got %T", v)
+	}
+	return nil
+}
+
 type OpenAIModelsResponse struct {
 	Data    []OpenAIModel `json:"data"`
 	Success bool          `json:"success"`

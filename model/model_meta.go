@@ -279,14 +279,19 @@ type ModelDeleteResult struct {
 	UpdatedChannels int `json:"updated_channels"`
 }
 
-// DeleteModelMetadata optionally removes exact model names from every channel.
-// Channel removal requires exact-match metadata records. Pricing removal
-// clears the selected names without expanding metadata matching rules.
+// DeleteModelMetadata removes models addressed by metadata ID. It keeps the
+// historical signature; name-based selections go through DeleteModelSelection.
 func DeleteModelMetadata(ids []int, removeFromChannels, removePricing bool) (ModelDeleteResult, error) {
+	return DeleteModelSelection(ids, nil, removeFromChannels, removePricing)
+}
+
+// DeleteModelSelection removes models addressed by metadata ID and/or model name.
+// A name also covers channel-only models: rows that exist only in channel model
+// lists (id 0 in the admin list, no metadata row). Such models have nothing but
+// their channel entries, so they are stripped from every channel that serves
+// them and therefore require removeFromChannels.
+func DeleteModelSelection(ids []int, modelNames []string, removeFromChannels, removePricing bool) (ModelDeleteResult, error) {
 	result := ModelDeleteResult{}
-	if len(ids) == 0 || len(ids) > 1000 {
-		return result, errors.New("select between 1 and 1000 models")
-	}
 	selected := make(map[int]struct{}, len(ids))
 	for _, id := range ids {
 		if id <= 0 {
@@ -299,53 +304,103 @@ func DeleteModelMetadata(ids []int, removeFromChannels, removePricing bool) (Mod
 		modelIDs = append(modelIDs, id)
 	}
 	sort.Ints(modelIDs)
-	names := make(map[string]struct{}, len(modelIDs))
+	nameFilter := make([]string, 0, len(modelNames))
+	for _, raw := range modelNames {
+		if name := strings.TrimSpace(raw); name != "" {
+			nameFilter = append(nameFilter, name)
+		}
+	}
+	if len(modelIDs)+len(nameFilter) == 0 || len(modelIDs)+len(nameFilter) > 1000 {
+		return result, errors.New("select between 1 and 1000 models")
+	}
+	names := make(map[string]struct{}, len(modelIDs)+len(nameFilter))
 	deleteRecords := func(tx *gorm.DB) error {
 		var records []Model
-		if err := lockForUpdate(tx).Where("id IN ?", modelIDs).Order("id").Find(&records).Error; err != nil {
+		query := lockForUpdate(tx).Order("id")
+		switch {
+		case len(modelIDs) > 0 && len(nameFilter) > 0:
+			query = query.Where("id IN ? OR model_name IN ?", modelIDs, nameFilter)
+		case len(modelIDs) > 0:
+			query = query.Where("id IN ?", modelIDs)
+		default:
+			query = query.Where("model_name IN ?", nameFilter)
+		}
+		if err := query.Find(&records).Error; err != nil {
 			return err
 		}
-		if len(records) != len(modelIDs) {
-			return errors.New("selected models changed; reload before deleting")
-		}
+		found := make(map[int]struct{}, len(records))
+		withMetadata := make(map[string]struct{}, len(records))
 		for _, record := range records {
+			found[record.Id] = struct{}{}
+			withMetadata[record.ModelName] = struct{}{}
 			if removeFromChannels && record.NameRule != NameRuleExact {
 				return errors.New("only exact-match models can be removed from channels")
 			}
 			names[record.ModelName] = struct{}{}
 		}
-		if removeFromChannels {
-			var channels []Channel
-			// Read only routing fields. Lock channels in a consistent order, then
-			// update models and abilities in the same transaction as metadata.
-			if err := lockForUpdate(tx).Select("id", "models", "status", "group", "priority", "weight", "tag").Order("id").Find(&channels).Error; err != nil {
+		// ID 选择要求全部命中，保持原有「列表已变化，请刷新」的保护。
+		for _, id := range modelIDs {
+			if _, ok := found[id]; !ok {
+				return errors.New("selected models changed; reload before deleting")
+			}
+		}
+		channelOnly := make(map[string]struct{}, len(nameFilter))
+		for _, name := range nameFilter {
+			names[name] = struct{}{}
+			if _, ok := withMetadata[name]; !ok {
+				channelOnly[name] = struct{}{}
+			}
+		}
+		if len(channelOnly) > 0 && !removeFromChannels {
+			return errors.New("models without metadata can only be removed from channels")
+		}
+		if len(records) > 0 {
+			recordIDs := make([]int, 0, len(records))
+			for _, record := range records {
+				recordIDs = append(recordIDs, record.Id)
+			}
+			if err := tx.Where("id IN ?", recordIDs).Delete(&Model{}).Error; err != nil {
 				return err
 			}
-			for _, channel := range channels {
-				models := channel.GetModels()
-				remaining := make([]string, 0, len(models))
-				for _, name := range models {
-					if _, remove := names[strings.TrimSpace(name)]; !remove {
-						remaining = append(remaining, name)
-					}
-				}
-				if len(remaining) == len(models) {
-					continue
-				}
-				channel.Models = strings.Join(remaining, ",")
-				if err := tx.Model(&Channel{}).Where("id = ?", channel.Id).Update("models", channel.Models).Error; err != nil {
-					return err
-				}
-				if err := channel.UpdateAbilities(tx); err != nil {
-					return err
-				}
-				result.UpdatedChannels++
-			}
-		}
-		if err := tx.Where("id IN ?", modelIDs).Delete(&Model{}).Error; err != nil {
-			return err
 		}
 		result.DeletedCount = len(records)
+		if !removeFromChannels {
+			return nil
+		}
+		var channels []Channel
+		// Read only routing fields. Lock channels in a consistent order, then
+		// update models and abilities in the same transaction as metadata.
+		if err := lockForUpdate(tx).Select("id", "models", "status", "group", "priority", "weight", "tag").Order("id").Find(&channels).Error; err != nil {
+			return err
+		}
+		stripped := make(map[string]struct{}, len(channelOnly))
+		for _, channel := range channels {
+			models := channel.GetModels()
+			remaining := make([]string, 0, len(models))
+			for _, name := range models {
+				trimmed := strings.TrimSpace(name)
+				if _, remove := names[trimmed]; !remove {
+					remaining = append(remaining, name)
+					continue
+				}
+				if _, ok := channelOnly[trimmed]; ok {
+					stripped[trimmed] = struct{}{}
+				}
+			}
+			if len(remaining) == len(models) {
+				continue
+			}
+			channel.Models = strings.Join(remaining, ",")
+			if err := tx.Model(&Channel{}).Where("id = ?", channel.Id).Update("models", channel.Models).Error; err != nil {
+				return err
+			}
+			if err := channel.UpdateAbilities(tx); err != nil {
+				return err
+			}
+			result.UpdatedChannels++
+		}
+		// 渠道派生模型没有元数据行可删，被真正摘掉的按「删除数」回报。
+		result.DeletedCount += len(stripped)
 		return nil
 	}
 	var err error

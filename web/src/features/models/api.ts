@@ -113,12 +113,14 @@ export async function updateModelStatus(
 export async function deleteModel(
   id: number,
   removeFromChannels = false,
-  removePricing = false
+  removePricing = false,
+  modelName?: string
 ): Promise<{ success: boolean; message?: string; data: ModelDeleteResult }> {
   const res = await api.delete(`/api/models/${id}`, {
     params: {
       remove_from_channels: removeFromChannels,
       remove_pricing: removePricing,
+      ...(modelName ? { model_name: modelName } : {}),
     },
   })
   return res.data
@@ -641,10 +643,12 @@ export interface ModelDeleteResult {
 export async function deleteModels(
   modelIds: number[],
   removeFromChannels = false,
-  removePricing = false
+  removePricing = false,
+  modelNames: string[] = []
 ): Promise<{ success: boolean; message?: string; data: ModelDeleteResult }> {
   const res = await api.post('/api/models/delete', {
     model_ids: modelIds,
+    ...(modelNames.length > 0 ? { model_names: modelNames } : {}),
     remove_from_channels: removeFromChannels,
     remove_pricing: removePricing,
   })

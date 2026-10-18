@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -346,6 +348,12 @@ func getFetchModelsResponseBody(method string, requestURL string, channel *model
 			request.Host = headers.Get(name)
 		}
 	}
+	// Some OpenAI-compatible shims compress the body whenever the client advertises
+	// gzip, but omit Content-Encoding, so Go would hand us opaque bytes. Ask for an
+	// identity response; the gzip sniff below still covers servers that compress anyway.
+	if request.Header.Get("Accept-Encoding") == "" {
+		request.Header.Set("Accept-Encoding", "identity")
+	}
 	client, err := service.NewProxyHttpClient(channel.GetSetting().Proxy)
 	if err != nil {
 		return nil, err
@@ -358,7 +366,19 @@ func getFetchModelsResponseBody(method string, requestURL string, channel *model
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status code: %d", response.StatusCode)
 	}
-	return io.ReadAll(response.Body)
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > 2 && body[0] == 0x1f && body[1] == 0x8b && response.Header.Get("Content-Encoding") == "" {
+		reader, gzipErr := gzip.NewReader(bytes.NewReader(body))
+		if gzipErr != nil {
+			return nil, fmt.Errorf("invalid gzip response: %w", gzipErr)
+		}
+		defer reader.Close()
+		return io.ReadAll(reader)
+	}
+	return body, nil
 }
 
 func fetchChannelUpstreamModelIDs(channel *model.Channel) ([]string, error) {

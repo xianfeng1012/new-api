@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"net/http"
 	"sort"
 	"strconv"
@@ -210,20 +211,35 @@ func DeleteModelMeta(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"success": false, "message": "Model pricing is managed by a super administrator."})
 		return
 	}
-	result, err := model.DeleteModelMetadata([]int{id}, removeFromChannels, removePricing)
+	// 仅存在于渠道的模型（列表里 id=0、没有元数据行）按名字删除：从所有渠道移除。
+	modelName := strings.TrimSpace(c.Query("model_name"))
+	ids := make([]int, 0, 1)
+	if id > 0 {
+		ids = append(ids, id)
+	}
+	var names []string
+	if modelName != "" {
+		names = append(names, modelName)
+	}
+	if len(ids) == 0 && len(names) == 0 {
+		common.ApiError(c, errors.New("invalid model ID"))
+		return
+	}
+	result, err := model.DeleteModelSelection(ids, names, removeFromChannels, removePricing)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	recordManageAudit(c, "model.delete", map[string]any{"model_ids": []int{id}, "remove_from_channels": removeFromChannels, "remove_pricing": removePricing, "updated_channels": result.UpdatedChannels})
+	recordManageAudit(c, "model.delete", map[string]any{"model_ids": []int{id}, "model_name": modelName, "remove_from_channels": removeFromChannels, "remove_pricing": removePricing, "updated_channels": result.UpdatedChannels})
 	common.ApiSuccess(c, result)
 }
 
 func BatchDeleteModelMeta(c *gin.Context) {
 	var request struct {
-		ModelIDs           []int `json:"model_ids"`
-		RemoveFromChannels bool  `json:"remove_from_channels"`
-		RemovePricing      bool  `json:"remove_pricing"`
+		ModelIDs           []int    `json:"model_ids"`
+		ModelNames         []string `json:"model_names"`
+		RemoveFromChannels bool     `json:"remove_from_channels"`
+		RemovePricing      bool     `json:"remove_pricing"`
 	}
 	if err := common.DecodeJson(c.Request.Body, &request); err != nil {
 		common.ApiError(c, err)
@@ -233,12 +249,22 @@ func BatchDeleteModelMeta(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"success": false, "message": "Model pricing is managed by a super administrator."})
 		return
 	}
-	result, err := model.DeleteModelMetadata(request.ModelIDs, request.RemoveFromChannels, request.RemovePricing)
+	ids := make([]int, 0, len(request.ModelIDs))
+	for _, id := range request.ModelIDs {
+		if id > 0 {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 && len(request.ModelNames) == 0 {
+		common.ApiError(c, errors.New("invalid model ID"))
+		return
+	}
+	result, err := model.DeleteModelSelection(ids, request.ModelNames, request.RemoveFromChannels, request.RemovePricing)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	recordManageAudit(c, "model.delete_batch", map[string]any{"model_ids": request.ModelIDs, "remove_from_channels": request.RemoveFromChannels, "remove_pricing": request.RemovePricing, "updated_channels": result.UpdatedChannels})
+	recordManageAudit(c, "model.delete_batch", map[string]any{"model_ids": request.ModelIDs, "model_names": request.ModelNames, "remove_from_channels": request.RemoveFromChannels, "remove_pricing": request.RemovePricing, "updated_channels": result.UpdatedChannels})
 	common.ApiSuccess(c, result)
 }
 

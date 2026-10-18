@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -603,4 +604,29 @@ func TestDetectAllChannelUpstreamModelUpdatesRejectsExistingActiveTask(t *testin
 	require.Equal(t, http.StatusConflict, recorder.Code)
 	require.Contains(t, recorder.Body.String(), existing.TaskID)
 	require.Contains(t, recorder.Body.String(), "已有模型更新任务正在运行或等待中")
+}
+
+func TestParseOpenAIModelIDsAcceptsNumericIDs(t *testing.T) {
+	ids, err := parseOpenAIModelIDs([]byte(`{"data":[{"id":1,"object":"model"},{"id":2.5},{"id":"three"}]}`))
+	require.NoError(t, err)
+	require.Equal(t, []string{"1", "2.5", "three"}, ids)
+}
+
+func TestGetFetchModelsResponseBodyDecompressesGzipWithoutContentEncoding(t *testing.T) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, err := zw.Write([]byte(`{"data":[{"id":1}]}`))
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "identity", r.Header.Get("Accept-Encoding"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer server.Close()
+
+	body, err := getFetchModelsResponseBody(http.MethodGet, server.URL, &model.Channel{}, http.Header{})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"data":[{"id":1}]}`, string(body))
 }
