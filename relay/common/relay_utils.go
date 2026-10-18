@@ -134,6 +134,21 @@ func GetTaskRequest(c *gin.Context) (TaskSubmitReq, error) {
 	return req, nil
 }
 
+// taskSubmitDurationSeconds 兼容画布把 duration 写成数字或数字字符串两种形状。
+func taskSubmitDurationSeconds(value any) int {
+	switch typed := value.(type) {
+	case float64:
+		return int(typed)
+	case int:
+		return typed
+	case string:
+		if parsed, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
 func validatePrompt(prompt string) *dto.TaskError {
 	if strings.TrimSpace(prompt) == "" {
 		return createTaskError(fmt.Errorf("prompt is required"), "invalid_request", http.StatusBadRequest, true)
@@ -326,6 +341,15 @@ func ValidateBasicTaskRequest(c *gin.Context, info *RelayInfo, action string) *d
 	// 为了metadata字段的兼容性，统一UnmarshalBodyReusable
 	if err := common.UnmarshalBodyReusable(c, &req); err != nil {
 		return createTaskError(err, "invalid_request", http.StatusBadRequest, true)
+	}
+
+	// BeefTV 等画布把提示词放在 input.prompt：顶层没有时用它兜底，避免直接 400。
+	if strings.TrimSpace(req.Prompt) == "" && req.Input != nil {
+		req.Prompt = strings.TrimSpace(req.Input.Prompt)
+	}
+	// parameters.duration 同样参与时长校验（画布不发顶层 duration/seconds）。
+	if req.Duration == 0 && req.Parameters != nil {
+		req.Duration = taskSubmitDurationSeconds(req.Parameters.Duration)
 	}
 
 	if taskErr := validatePrompt(req.Prompt); taskErr != nil {

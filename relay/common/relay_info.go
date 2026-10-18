@@ -1032,6 +1032,32 @@ type TaskSubmitReq struct {
 	// 视频桥接改写 seconds 时，会把用户请求的真实时长放在这个私有字段里带过来。
 	// 必须原样透传，上游（号池）才能在顶层 seconds 是占位值时取回真实时长。
 	BillingSeconds any `json:"_billing_seconds,omitempty"`
+
+	// 画布（BeefTV / infinite-canvas 等）把提示词、参考图放在 input 子对象里，把
+	// 时长/比例/分辨率放在 parameters 里。结构体必须显式接收，否则这些字段在转发前
+	// 就被静默丢弃；ValidateBasicTaskRequest 会在顶层缺 prompt 时用 input.prompt 兜底。
+	Input      *TaskSubmitInput      `json:"input,omitempty"`
+	Parameters *TaskSubmitParameters `json:"parameters,omitempty"`
+}
+
+// TaskSubmitInput is the canvas-style input object.
+type TaskSubmitInput struct {
+	Prompt string            `json:"prompt,omitempty"`
+	Media  []TaskSubmitMedia `json:"media,omitempty"`
+}
+
+// TaskSubmitMedia is one canvas media reference.
+type TaskSubmitMedia struct {
+	Type string `json:"type,omitempty"`
+	URL  string `json:"url,omitempty"`
+}
+
+// TaskSubmitParameters carries the canvas duration/ratio/resolution knobs.
+// Duration is "any" because canvas clients send both numbers and numeric strings.
+type TaskSubmitParameters struct {
+	Duration   any    `json:"duration,omitempty"`
+	Ratio      string `json:"ratio,omitempty"`
+	Resolution string `json:"resolution,omitempty"`
 }
 
 func (t *TaskSubmitReq) GetPrompt() string {

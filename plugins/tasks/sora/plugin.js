@@ -370,8 +370,11 @@ export function parseSubmitResponse(ctx, resp) {
 // 画布直连的 multipart 不经桥接改写，退回请求体的 duration/seconds。
 // 上限沿用任务时长上限（3600s），异常值不会放大计费。
 function billingSeconds(req) {
+  const parameters = req.parameters && typeof req.parameters === "object" && !Array.isArray(req.parameters) ? req.parameters : {};
   const metadata = req.metadata && typeof req.metadata === "object" && !Array.isArray(req.metadata) ? req.metadata : {};
-  for (const candidate of [req._billing_seconds, req.duration, metadata.seconds, metadata.duration, req.seconds]) {
+  // 画布/桥接的 meaicc 体把时长放在 parameters.duration，老候选列表认不出 → 兜底成 1s，
+  // 任务日志的时长和按秒计费的用量都会偏小。
+  for (const candidate of [req._billing_seconds, parameters.duration, parameters.seconds, req.duration, metadata.seconds, metadata.duration, req.seconds]) {
     const value = Number(candidate);
     if (Number.isFinite(value) && value > 0) return Math.min(value, 3600);
   }
